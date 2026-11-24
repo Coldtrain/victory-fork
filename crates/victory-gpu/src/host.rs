@@ -3876,6 +3876,16 @@ impl Host {
                 self.settle(&mut submitted, why);
             }
         }
+        // Texture uploads read a persistent, CPU-mapped staging buffer. A
+        // later submission may detile new video/texture contents into that
+        // same buffer while an earlier late-submitted list is still copying
+        // from it. XCL serializes its texture refresh/upload work behind a
+        // queue fence; until Victory has per-submission staging snapshots,
+        // settle outstanding flights before any texture refresh can rewrite
+        // a staging allocation they may still be reading.
+        if late && flying() && runs.iter().any(|list| list.has_deferred_textures()) {
+            self.settle(&mut submitted, WHY_SYNC);
+        }
         let behind = late && flying();
         // Before this submission counts as started: what the sweep lets go
         // of is named by no list, and nothing runs now (behind flights the
@@ -5067,6 +5077,15 @@ impl HostList {
     /// submitted, keeping it alive until the list is reset.
     pub(crate) fn defer_texture(&self, staging: std::sync::Arc<crate::texture::Staging>) {
         self.deferred().copies.push(Step::Texture(staging));
+    }
+
+    /// Whether this list will inspect or refresh a persistent texture staging buffer
+    /// while its submission is being prepared.
+    fn has_deferred_textures(&self) -> bool {
+        self.deferred()
+            .copies
+            .iter()
+            .any(|step| matches!(step, Step::Texture(_)))
     }
 
     /// Runs the list's submission-time steps; refreshes go into `batch`
