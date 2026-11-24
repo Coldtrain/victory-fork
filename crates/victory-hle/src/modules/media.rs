@@ -476,10 +476,10 @@ type D3D11CreateDeviceFn = unsafe extern "system" fn(
 
 unsafe fn enable_multithread_protection(device: &windows::core::IUnknown) {
     let mut raw = std::ptr::null_mut();
-    let hr = device.query(&IID_ID3D10_MULTITHREAD, &mut raw);
+    let hr = unsafe { device.query(&IID_ID3D10_MULTITHREAD, &mut raw) };
     if hr.is_ok() && !raw.is_null() {
         // ID3D10Multithread::SetMultithreadProtected is vtable slot 5.
-        let interface = windows::core::IUnknown::from_raw(raw);
+        let interface = unsafe { windows::core::IUnknown::from_raw(raw) };
         // SAFETY: the returned interface is a live COM object; slot 5 is
         // ID3D10Multithread::SetMultithreadProtected.
         let set_protected = unsafe {
@@ -507,6 +507,7 @@ unsafe fn adapter_for_luid(
 unsafe fn create_d3d11_bridge(
     luid: Option<windows::Win32::Foundation::LUID>,
 ) -> Result<windows::core::IUnknown, String> {
+    use windows::core::Interface;
     let proc = crate::host::function("d3d11.dll", "D3D11CreateDevice")
         .ok_or_else(|| "System32 d3d11.dll!D3D11CreateDevice is unavailable".to_string())?;
     // SAFETY: the symbol is the System32 D3D11CreateDevice export.
