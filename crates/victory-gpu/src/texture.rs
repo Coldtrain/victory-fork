@@ -514,16 +514,16 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
     };
     use std::sync::atomic::Ordering::Relaxed;
     staging.used.store(crate::host::moment(), Relaxed);
-    // The host texture has the staging buffer's contents: only the check
-    // at submission is left, and what it finds changed the next list that
-    // samples the texture uploads (a frame late where every list of the
-    // frame was recorded before that check).
-    if staging.uploaded.load(Relaxed) && !staging.dirty.load(Relaxed) {
-        #[cfg(feature = "diagnostics")]
-        crate::copystat::add(crate::copystat::C::TexSkipped, 1);
-        list.defer_texture(staging);
-        return;
-    }
+    // Refresh happens during submission preparation, after this command
+    // list has been recorded but before it is sent to the GPU. Therefore a
+    // "clean" staging buffer at record time is not proof that it will still
+    // be clean when the deferred refresh runs: the title may have written a
+    // new frame in between. Always record the copy for sampled title
+    // textures so that a change discovered by that refresh is uploaded in
+    // this submission, not one frame later. This is the correctness-first
+    // counterpart of XCL's pre-submit refresh-and-batch path; a dedicated
+    // upload list is needed before this can be skipped without risking a
+    // stale frame.
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::TexUploads, 1);
     const COPY_DEST: u32 = 0x400;
@@ -577,18 +577,15 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
         // SAFETY: an open list; both locations name live resources.
         unsafe { list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
     }
-    // When the list is submitted, its copy takes what the staging buffer
-    // holds by then: noted before the check below, which sets `dirty`
-    // again if it detiles (the next list then uploads once more).
-    {
-        let staging = staging.clone();
-        list.defer_host(move || {
-            staging.uploaded.store(true, Relaxed);
-            staging.dirty.store(false, Relaxed);
-        });
-    }
-    // Once per submission however many of its lists sample the texture.
-    list.defer_texture(staging);
+    // Refresh the staging buffer before the command lists execute. Mark
+    // it clean only after that refresh: the old ordering cleared dirty
+    // first and then let refresh set it again, which made the freshly
+    // uploaded texture look dirty for the following submission.
+    list.defer_texture(staging.clone());
+    list.defer_host(move || {
+        staging.uploaded.store(true, Relaxed);
+        staging.dirty.store(false, Relaxed);
+    });
 }
 
 impl Staging {
