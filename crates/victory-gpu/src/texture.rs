@@ -667,14 +667,17 @@ impl Staging {
         // is noted, a mapping is announced by the runtime. While neither
         // happened the texture is as it was. What the guard cannot see (a
         // write to the same pages through another view) is still found by
-        // the hash, which is taken every eighth frame only, by the
-        // texture's address, so the textures take turns.
-        // `VICTORY_TEXTURE_GUARD=0` hashes at every check, as before.
+        // the hash. The guard cannot observe those writes: they do not fault
+        // at this address. Hash every refresh rather than every eighth frame;
+        // streamed movie surfaces can be rewritten through an alias every
+        // frame, and treating them as unchanged produces stale/flickering
+        // frames. `VICTORY_TEXTURE_GUARD=0` remains a diagnostic way to
+        // disable the guard entirely.
         static GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
             && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, true))
         {
-            const HASH_EVERY: u64 = 8;
+            const HASH_EVERY: u64 = 1;
             let unwritten = last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked);
             last.asked = now;
             let turn = crate::frame::current().wrapping_add((start >> 16) as u64).is_multiple_of(HASH_EVERY);
