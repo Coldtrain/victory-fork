@@ -2191,10 +2191,7 @@ impl<'a> Lower<'a> {
                 };
             }
             Input::Barycentric { kind, index } => return self.barycentric(kind, index),
-            // DXIL semantic kind 10 is SV_PrimitiveID (D3D_NAME_PRIMITIVE_ID).
-            // Add it to the host signature below when the console signature
-            // omitted this system value.
-            Input::PrimitiveId => (10, 0),
+            Input::PrimitiveId => return Val::Missing("the primitive id"),
             // The console code tests it against 0 (`v_cmp_ne_u32`), as the
             // host's value can be.
             Input::FrontFace => (13, 0),
@@ -2234,12 +2231,10 @@ impl<'a> Lower<'a> {
                 }
                 id
             }
-            None if kind >= 3 && kind != 10 => {
-                return Val::Missing("a pixel system input the signature lacks");
-            }
+            None if kind >= 3 => return Val::Missing("a pixel system input the signature lacks"),
             None => {
-                // The console signature may omit system-generated ids. Give
-                // them explicit DXIL signature rows after the declared inputs.
+                // The console signature leaves out vertex and instance ids; PC
+                // gives them a row after the others.
                 let row = self
                     .s
                     .inputs
@@ -2248,14 +2243,8 @@ impl<'a> Lower<'a> {
                     .map(|r| r + 1)
                     .max()
                     .unwrap_or(0);
-                let name = match kind {
-                    1 => "SV_VertexID",
-                    2 => "SV_InstanceID",
-                    10 => "SV_PrimitiveID",
-                    _ => unreachable!("only supported system ids reach this arm"),
-                };
                 self.s.inputs.push(SigElement {
-                    name: name.into(),
+                    name: ["", "SV_VertexID", "SV_InstanceID"][kind as usize].into(),
                     index: 0,
                     kind,
                     comp: 5,
