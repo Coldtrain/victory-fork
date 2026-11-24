@@ -583,7 +583,9 @@ pub unsafe extern "system" fn MFResetDXGIDeviceManagerX(
     // prevents releasing the caller's references.
     let manager = ManuallyDrop::new(unsafe { IMFDXGIDeviceManager::from_raw(manager) });
     let device = ManuallyDrop::new(unsafe { IUnknown::from_raw(device) });
-    let direct_error = match manager.ResetDevice(&*device, reset_token) {
+    // SAFETY: `manager` and `device` are live borrowed COM interfaces; the
+    // manager validates the supplied device and reset token.
+    let direct_error = match unsafe { manager.ResetDevice(&*device, reset_token) } {
         Ok(()) => {
             tracing::debug!("mfplat: MFResetDXGIDeviceManagerX direct reset succeeded");
             return S_OK;
@@ -597,7 +599,9 @@ pub unsafe extern "system" fn MFResetDXGIDeviceManagerX(
     };
     let luid = unsafe { d3d12.GetAdapterLuid() };
     match unsafe { create_d3d11_bridge(Some(luid)) } {
-        Ok(bridge) => match manager.ResetDevice(&bridge, reset_token) {
+        // SAFETY: `bridge` is a live D3D11 device created above and `manager`
+        // remains alive for this call.
+        Ok(bridge) => match unsafe { manager.ResetDevice(&bridge, reset_token) } {
             Ok(()) => {
                 tracing::info!(
                     adapter = format!("{:x}:{:x}", luid.HighPart, luid.LowPart),
