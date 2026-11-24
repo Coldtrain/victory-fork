@@ -69,6 +69,21 @@ unsafe impl Sync for Staging {}
 
 static STAGING: Mutex<Option<HashMap<usize, Arc<Staging>>>> = Mutex::new(None);
 
+/// Newer title textures can reuse only part of an older texture's memory.
+/// XCL retires the older view from its title-memory refresh set in that
+/// case: otherwise a later submission can upload the old view over memory
+/// now owned by the newer texture. Exact-range aliases are deliberately
+/// kept, since they can be legitimate format views of the same bytes.
+static SHADOWS: Mutex<Option<HashMap<usize, Vec<usize>>>> = Mutex::new(None);
+static SHADOWED: Mutex<Option<std::collections::HashSet<usize>>> = Mutex::new(None);
+
+/// Whether an older texture is covered by a newer, partially overlapping
+/// title texture. Called while the staging registry is locked.
+fn shadowed(resource: usize) -> bool {
+    SHADOWED.lock().unwrap_or_else(|e| e.into_inner())
+        .as_ref().is_some_and(|set| set.contains(&resource))
+}
+
 /// The buffer a texture the host writes is copied through into the texture
 /// of a view the title placed in its memory in another format
 /// ([`alias`]): every level of every layer as each of the two formats lays
@@ -469,6 +484,28 @@ pub(crate) fn forget(resource: usize) {
     if let Some(map) = map.as_mut() {
         map.remove(&resource);
     }
+    // Retiring a newer view may make an older overlapping texture active
+    // again, but only if no other newer view still shadows it.
+    let mut shadows = SHADOWS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut shadowed = SHADOWED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut candidates = shadows.as_mut()
+        .and_then(|all| all.remove(&resource))
+        .unwrap_or_default();
+    if let Some(all) = shadows.as_mut() {
+        for older in all.values_mut() {
+            older.retain(|&candidate| candidate != resource);
+        }
+        all.retain(|_, older| !older.is_empty());
+        candidates.retain(|candidate| !all.values().any(|older| older.contains(candidate)));
+    }
+    if let Some(set) = shadowed.as_mut() {
+        set.remove(&resource);
+        for candidate in candidates {
+            set.remove(&candidate);
+        }
+    }
+    drop(shadowed);
+    drop(shadows);
     let mut set = HOST_WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(set) = set.as_mut() {
         set.remove(&resource);
@@ -492,6 +529,9 @@ pub(crate) fn title_written(texture: &ID3D12Resource) -> bool {
 /// submission if the memory changed. Leaves the texture in the copy
 /// destination state.
 pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) {
+    if shadowed(resource as usize) {
+        return;
+    }
     let host_written = HOST_WRITTEN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1068,6 +1108,33 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         last: Mutex::default(),
         used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
     });
+
+    // Match XCL's title-texture overlap rule. A newer allocation that
+    // partially covers an older texture owns those bytes now; keeping both
+    // refreshable lets the older resource upload stale data over the newer
+    // surface. Exact aliases remain active because they may be alternate
+    // format views of the same allocation.
+    let (new_start, new_end) = (memory as usize, (memory as usize).saturating_add(s.layout.size as usize));
+    let older: Vec<usize> = map.iter().filter_map(|(&key, old)| {
+        let (old_start, old_end) = (old.memory as usize, (old.memory as usize).saturating_add(old.layout.size as usize));
+        let overlaps = new_start < old_end && old_start < new_end;
+        let exact_alias = new_start == old_start && new_end == old_end;
+        (overlaps && !exact_alias).then_some(key)
+    }).collect();
+    if !older.is_empty() {
+        let mut shadows = SHADOWS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shadowed = SHADOWED.lock().unwrap_or_else(|e| e.into_inner());
+        shadows.get_or_insert_with(HashMap::new).insert(resource as usize, older.clone());
+        let set = shadowed.get_or_insert_with(std::collections::HashSet::new);
+        for key in &older {
+            set.insert(*key);
+        }
+        tracing::debug!(
+            resource = ?resource,
+            shadows = older.len(),
+            "new title texture partially overlaps older texture memory; older refreshes suppressed"
+        );
+    }
     map.insert(resource as usize, s.clone());
     Some(s)
 }
