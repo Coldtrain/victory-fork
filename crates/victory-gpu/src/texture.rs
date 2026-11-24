@@ -1010,11 +1010,42 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
     let host = host()?;
     // SAFETY: a live resource.
     let d = unsafe { texture.GetDesc() };
-    let count = if d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D {
+    // XCL validates the number and ordering of subresources against the
+    // resource before recording any copies. Do the same here: a mismatch
+    // between the console layout and host resource can otherwise make mip
+    // or array-slice data land in the wrong part of a video surface.
+    let is_3d = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    let arrays = if is_3d { 1 } else { u32::from(d.DepthOrArraySize) };
+    let expected = layout.desc.mips.checked_mul(arrays);
+    let count = if is_3d {
         u32::from(d.MipLevels)
     } else {
-        u32::from(d.MipLevels) * u32::from(d.DepthOrArraySize)
+        u32::from(d.MipLevels).checked_mul(u32::from(d.DepthOrArraySize)).unwrap_or(0)
     };
+    let dimensions_match =
+        d.Width == u64::from(layout.desc.width)
+            && d.Height == layout.desc.height
+            && u32::from(d.MipLevels) == layout.desc.mips
+            && (if is_3d {
+                layout.desc.dimension == victory_formats::texture::Dimension::Tex3d
+                    && u32::from(d.DepthOrArraySize) == layout.desc.depth
+            } else {
+                layout.desc.dimension != victory_formats::texture::Dimension::Tex3d
+                    && arrays == layout.desc.depth
+            });
+    if !dimensions_match || expected != Some(count) || count == 0 {
+        tracing::warn!(
+            ?desc,
+            width = d.Width,
+            height = d.Height,
+            depth_or_array = d.DepthOrArraySize,
+            mips = d.MipLevels,
+            expected_subresources = ?expected,
+            actual_subresources = count,
+            "texture layout does not match host resource; refusing texture upload"
+        );
+        return None;
+    }
     let mut footprints = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); count as usize];
     let mut rows = vec![0u32; count as usize];
     let mut total = 0;
