@@ -475,6 +475,7 @@ type D3D11CreateDeviceFn = unsafe extern "system" fn(
 ) -> HRESULT;
 
 unsafe fn enable_multithread_protection(device: &windows::core::IUnknown) {
+    use windows::core::Interface;
     let mut raw = std::ptr::null_mut();
     let hr = unsafe { device.query(&IID_ID3D10_MULTITHREAD, &mut raw) };
     if hr.is_ok() && !raw.is_null() {
