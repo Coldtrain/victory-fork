@@ -33,7 +33,7 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_Input_XboxController",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# Diagnostics only: recording our own audio (`modules::audio::capture`).
+# Media Foundation D3D11 device-manager bridge and diagnostic audio capture.
 windows = { workspace = true, features = [
     "Win32_Media_Audio",
     "Win32_Graphics_Direct3D",
