@@ -401,6 +401,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn primitive_id_uses_the_dxil_primitive_id_system_value() {
+        let input = SigElement {
+            name: "SV_PrimitiveID".into(),
+            index: 0,
+            kind: 10,
+            comp: 5,
+            interp: 0,
+            row: Some(0),
+            col: 0,
+            cols: 1,
+            usage: 0,
+            half: false,
+        };
+        assert_eq!(input.system_value(), 7);
+    }
+
+    #[test]
     fn md5_core_matches_the_standard() {
         // Standard MD5 of "abc" with standard padding, through md5_block.
         let mut block = b"abc".to_vec();
