@@ -480,10 +480,15 @@ unsafe fn enable_multithread_protection(device: &windows::core::IUnknown) {
     if hr.is_ok() && !raw.is_null() {
         // ID3D10Multithread::SetMultithreadProtected is vtable slot 5.
         let interface = windows::core::IUnknown::from_raw(raw);
-        let vtable = *(interface.as_raw() as *const *const usize);
-        let set_protected: unsafe extern "system" fn(*mut c_void, i32) -> i32 =
-            std::mem::transmute(*vtable.add(5));
-        let _ = set_protected(interface.as_raw(), 1);
+        // SAFETY: the returned interface is a live COM object; slot 5 is
+        // ID3D10Multithread::SetMultithreadProtected.
+        let set_protected = unsafe {
+            let vtable = *(interface.as_raw() as *const *const usize);
+            std::mem::transmute::<usize, unsafe extern "system" fn(*mut c_void, i32) -> i32>(
+                *vtable.add(5),
+            )
+        };
+        let _ = unsafe { set_protected(interface.as_raw(), 1) };
     }
 }
 
@@ -494,8 +499,9 @@ unsafe fn adapter_for_luid(
     if luid.LowPart == 0 && luid.HighPart == 0 {
         return None;
     }
-    let factory: IDXGIFactory4 = CreateDXGIFactory1().ok()?;
-    factory.EnumAdapterByLuid::<IDXGIAdapter>(luid).ok()
+    // SAFETY: the factory and adapter are owned COM references returned by DXGI.
+    let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory1().ok()? };
+    unsafe { factory.EnumAdapterByLuid::<IDXGIAdapter>(luid).ok() }
 }
 
 unsafe fn create_d3d11_bridge(
@@ -503,7 +509,8 @@ unsafe fn create_d3d11_bridge(
 ) -> Result<windows::core::IUnknown, String> {
     let proc = crate::host::function("d3d11.dll", "D3D11CreateDevice")
         .ok_or_else(|| "System32 d3d11.dll!D3D11CreateDevice is unavailable".to_string())?;
-    let create: D3D11CreateDeviceFn = std::mem::transmute(proc);
+    // SAFETY: the symbol is the System32 D3D11CreateDevice export.
+    let create: D3D11CreateDeviceFn = unsafe { std::mem::transmute(proc) };
     let adapter = luid.and_then(|value| unsafe { adapter_for_luid(value) });
     let try_create = |adapter: *mut c_void, driver: i32, flags: u32| {
         let (mut device, mut context, mut level) = (std::ptr::null_mut(), std::ptr::null_mut(), 0u32);
@@ -574,13 +581,17 @@ pub unsafe extern "system" fn MFResetDXGIDeviceManagerX(
     // prevents releasing the caller's references.
     let manager = ManuallyDrop::new(unsafe { IMFDXGIDeviceManager::from_raw(manager) });
     let device = ManuallyDrop::new(unsafe { IUnknown::from_raw(device) });
-    if manager.ResetDevice(&*device, reset_token).is_ok() {
-        tracing::debug!("mfplat: MFResetDXGIDeviceManagerX direct reset succeeded");
-        return S_OK;
-    }
+    let direct_error = match manager.ResetDevice(&*device, reset_token) {
+        Ok(()) => {
+            tracing::debug!("mfplat: MFResetDXGIDeviceManagerX direct reset succeeded");
+            return S_OK;
+        }
+        Err(error) => error,
+    };
+    let direct_hr = direct_error.code().0;
     let Ok(d3d12) = device.cast::<ID3D12Device>() else {
-        tracing::warn!("mfplat: device manager rejected a non-D3D12 device");
-        return 0x80004005u32 as i32;
+        tracing::warn!(hr = format!("{direct_hr:#x}"), "mfplat: device manager rejected the supplied device");
+        return direct_hr;
     };
     let luid = unsafe { d3d12.GetAdapterLuid() };
     match unsafe { create_d3d11_bridge(Some(luid)) } {
@@ -594,13 +605,13 @@ pub unsafe extern "system" fn MFResetDXGIDeviceManagerX(
             }
             Err(error) => {
                 let hr = error.code().0;
-                tracing::warn!(hr = format_args!("{hr:#x}"), "mfplat: D3D11 bridge reset failed");
+                tracing::warn!(hr = format!("{hr:#x}"), "mfplat: D3D11 bridge reset failed");
                 hr
             }
         },
         Err(error) => {
-            tracing::warn!(%error, "mfplat: could not create D3D11 video device bridge");
-            0x80004005u32 as i32
+            tracing::warn!(%error, direct_hr = format!("{direct_hr:#x}"), "mfplat: could not create D3D11 video device bridge");
+            direct_hr
         }
     }
 }
