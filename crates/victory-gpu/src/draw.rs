@@ -244,7 +244,16 @@ impl State {
 /// its picture.
 fn scissor_test() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("VICTORY_SCISSOR_TEST").as_deref() == Ok("full"))
+    *ON.get_or_init(|| {
+        // The title's scissor state clips large parts of the world (including
+        // the player's torso and room walls). Widening these rectangles is
+        // currently the only verified way to make that geometry visible.
+        // Keep an opt-out for diagnosing a future scissor-state fix.
+        !matches!(
+            std::env::var("VICTORY_SCISSOR_TEST").as_deref(),
+            Ok("off") | Ok("0")
+        )
+    })
 }
 
 /// An experiment on mesh draws (`VICTORY_MESH_TEST`): 1 for `skip` (none
