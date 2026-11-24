@@ -640,6 +640,19 @@ mod tests {
     }
 
     #[test]
+    fn reset_device_manager_rejects_null_arguments() {
+        // SAFETY: null inputs are explicitly rejected before either pointer is dereferenced.
+        assert_eq!(
+            unsafe { MFResetDXGIDeviceManagerX(std::ptr::null_mut(), std::ptr::null_mut(), 0) },
+            E_POINTER
+        );
+        assert_eq!(
+            unsafe { MFResetDXGIDeviceManagerX(1usize as *mut c_void, std::ptr::null_mut(), 0) },
+            E_POINTER
+        );
+    }
+
+    #[test]
     fn only_local_files_reach_the_host() {
         // Network schemes and shares are refused, naming scheme and host.
         let refused = |url: &str| local(&wide(url)).unwrap_err();
