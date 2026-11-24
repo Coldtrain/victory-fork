@@ -47,13 +47,10 @@ pub(crate) struct Staging {
     bytes: u64,
     memory: *const u8,
     last: Mutex<Last>,
-    /// Whether the staging buffer was detiled since a submitted list last
-    /// uploaded it, and whether one has uploaded it at all: a list records
-    /// the upload only then. (Every list that sampled a title texture
-    /// uploaded all of it again, changed or not: 5,411 subresource copies
-    /// of 1,120 textures in one frame of run 18.)
+    /// Whether the staging buffer was detiled since the last submission
+    /// prepared its upload. Kept for refresh diagnostics and future
+    /// submission-time upload batching.
     dirty: std::sync::atomic::AtomicBool,
-    uploaded: std::sync::atomic::AtomicBool,
     /// When a list last recorded a use of it (`crate::host::moment`).
     used: std::sync::atomic::AtomicU64,
 }
@@ -583,7 +580,6 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
     // uploaded texture look dirty for the following submission.
     list.defer_texture(staging.clone());
     list.defer_host(move || {
-        staging.uploaded.store(true, Relaxed);
         staging.dirty.store(false, Relaxed);
     });
 }
@@ -1082,7 +1078,6 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         memory,
         last: Mutex::default(),
         dirty: std::sync::atomic::AtomicBool::new(true),
-        uploaded: std::sync::atomic::AtomicBool::new(false),
         used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
     });
     map.insert(resource as usize, s.clone());
