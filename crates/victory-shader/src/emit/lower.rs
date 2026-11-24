@@ -2191,7 +2191,10 @@ impl<'a> Lower<'a> {
                 };
             }
             Input::Barycentric { kind, index } => return self.barycentric(kind, index),
-            Input::PrimitiveId => return Val::Missing("the primitive id"),
+            // D3D_NAME_PRIMITIVE_ID (7): forward the hardware primitive
+            // identifier through the pixel-shader input signature instead
+            // of refusing shaders that consume SV_PrimitiveID.
+            Input::PrimitiveId => (7, 0),
             // The console code tests it against 0 (`v_cmp_ne_u32`), as the
             // host's value can be.
             Input::FrontFace => (13, 0),
