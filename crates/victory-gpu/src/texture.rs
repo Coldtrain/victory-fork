@@ -47,10 +47,6 @@ pub(crate) struct Staging {
     bytes: u64,
     memory: *const u8,
     last: Mutex<Last>,
-    /// Whether the staging buffer was detiled since the last submission
-    /// prepared its upload. Kept for refresh diagnostics and future
-    /// submission-time upload batching.
-    dirty: std::sync::atomic::AtomicBool,
     /// When a list last recorded a use of it (`crate::host::moment`).
     used: std::sync::atomic::AtomicU64,
 }
@@ -574,14 +570,9 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
         // SAFETY: an open list; both locations name live resources.
         unsafe { list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
     }
-    // Refresh the staging buffer before the command lists execute. Mark
-    // it clean only after that refresh: the old ordering cleared dirty
-    // first and then let refresh set it again, which made the freshly
-    // uploaded texture look dirty for the following submission.
-    list.defer_texture(staging.clone());
-    list.defer_host(move || {
-        staging.dirty.store(false, Relaxed);
-    });
+    // Refresh the staging buffer during submission preparation, before
+    // the already-recorded copy commands are sent to the GPU.
+    list.defer_texture(staging);
 }
 
 impl Staging {
@@ -795,8 +786,6 @@ impl Staging {
                 return;
             }
         }
-        // Publish only after every mip and array slice has been detiled.
-        self.dirty.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -1077,7 +1066,6 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
         bytes: total,
         memory,
         last: Mutex::default(),
-        dirty: std::sync::atomic::AtomicBool::new(true),
         used: std::sync::atomic::AtomicU64::new(crate::host::moment()),
     });
     map.insert(resource as usize, s.clone());
