@@ -455,11 +455,162 @@ pub extern "system" fn MFCreateSourceResolver(out: *mut *mut Resolver) -> HRESUL
     S_OK
 }
 
+
+/// Xbox GDK's MFResetDXGIDeviceManagerX binds the title's D3D12 device to
+/// Media Foundation. Windows' IMFDXGIDeviceManager requires a D3D11 device,
+/// so bridge to a video-capable D3D11 device on the same adapter.
+const D3D_DRIVER_TYPE_UNKNOWN: i32 = 0;
+const D3D_DRIVER_TYPE_HARDWARE: i32 = 1;
+const D3D_DRIVER_TYPE_WARP: i32 = 5;
+const D3D11_CREATE_DEVICE_BGRA_SUPPORT: u32 = 0x20;
+const D3D11_CREATE_DEVICE_VIDEO_SUPPORT: u32 = 0x800;
+const D3D11_SDK_VERSION: u32 = 7;
+const D3D_FEATURE_LEVELS: [u32; 4] = [0xb100, 0xb000, 0xa100, 0xa000];
+const IID_ID3D10_MULTITHREAD: windows::core::GUID =
+    windows::core::GUID::from_u128(0x9b7e4e00_342c_4106_a19f_4f2704f689f0);
+
+type D3D11CreateDeviceFn = unsafe extern "system" fn(
+    *mut c_void, i32, *mut c_void, u32, *const u32, u32, u32,
+    *mut *mut c_void, *mut u32, *mut *mut c_void,
+) -> HRESULT;
+
+unsafe fn enable_multithread_protection(device: &windows::core::IUnknown) {
+    let mut raw = std::ptr::null_mut();
+    let hr = device.query(&IID_ID3D10_MULTITHREAD, &mut raw);
+    if hr.is_ok() && !raw.is_null() {
+        // ID3D10Multithread::SetMultithreadProtected is vtable slot 5.
+        let interface = windows::core::IUnknown::from_raw(raw);
+        let vtable = *(interface.as_raw() as *const *const usize);
+        let set_protected: unsafe extern "system" fn(*mut c_void, i32) -> i32 =
+            std::mem::transmute(*vtable.add(5));
+        let _ = set_protected(interface.as_raw(), 1);
+    }
+}
+
+unsafe fn adapter_for_luid(
+    luid: windows::Win32::Foundation::LUID,
+) -> Option<windows::Win32::Graphics::Dxgi::IDXGIAdapter> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory4};
+    if luid.LowPart == 0 && luid.HighPart == 0 {
+        return None;
+    }
+    let factory: IDXGIFactory4 = CreateDXGIFactory1().ok()?;
+    factory.EnumAdapterByLuid::<IDXGIAdapter>(luid).ok()
+}
+
+unsafe fn create_d3d11_bridge(
+    luid: Option<windows::Win32::Foundation::LUID>,
+) -> Result<windows::core::IUnknown, String> {
+    let proc = crate::host::function("d3d11.dll", "D3D11CreateDevice")
+        .ok_or_else(|| "System32 d3d11.dll!D3D11CreateDevice is unavailable".to_string())?;
+    let create: D3D11CreateDeviceFn = std::mem::transmute(proc);
+    let adapter = luid.and_then(|value| unsafe { adapter_for_luid(value) });
+    let try_create = |adapter: *mut c_void, driver: i32, flags: u32| {
+        let (mut device, mut context, mut level) = (std::ptr::null_mut(), std::ptr::null_mut(), 0u32);
+        // SAFETY: output pointers and feature-level array are valid for this call.
+        let hr = unsafe {
+            create(
+                adapter, driver, std::ptr::null_mut(), flags,
+                D3D_FEATURE_LEVELS.as_ptr(), D3D_FEATURE_LEVELS.len() as u32,
+                D3D11_SDK_VERSION, &mut device, &mut level, &mut context,
+            )
+        };
+        if !context.is_null() {
+            // SAFETY: D3D11CreateDevice returned an owned context reference.
+            drop(unsafe { windows::core::IUnknown::from_raw(context) });
+        }
+        if hr >= 0 && !device.is_null() {
+            // SAFETY: D3D11CreateDevice returned an owned device reference.
+            let device = unsafe { windows::core::IUnknown::from_raw(device) };
+            unsafe { enable_multithread_protection(&device) };
+            Ok(device)
+        } else {
+            if !device.is_null() {
+                // SAFETY: release the partial output returned on failure.
+                drop(unsafe { windows::core::IUnknown::from_raw(device) });
+            }
+            Err(hr)
+        }
+    };
+    let flag_sets = [
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    ];
+    let mut last = 0;
+    if let Some(adapter) = adapter {
+        for flags in flag_sets {
+            match try_create(adapter.as_raw(), D3D_DRIVER_TYPE_UNKNOWN, flags) {
+                Ok(device) => return Ok(device),
+                Err(hr) => last = hr,
+            }
+        }
+    }
+    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+        for flags in flag_sets {
+            match try_create(std::ptr::null_mut(), driver, flags) {
+                Ok(device) => return Ok(device),
+                Err(hr) => last = hr,
+            }
+        }
+    }
+    Err(format!("D3D11CreateDevice failed: {last:#x}"))
+}
+
+/// Xbox GDK: MFResetDXGIDeviceManagerX(IMFDXGIDeviceManager*, IUnknown*, UINT32).
+pub unsafe extern "system" fn MFResetDXGIDeviceManagerX(
+    manager: *mut c_void,
+    device: *mut c_void,
+    reset_token: u32,
+) -> HRESULT {
+    use std::mem::ManuallyDrop;
+    use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+    use windows::Win32::Media::MediaFoundation::IMFDXGIDeviceManager;
+    use windows::core::{IUnknown, Interface};
+
+    if manager.is_null() || device.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: these COM pointers are borrowed from the title; ManuallyDrop
+    // prevents releasing the caller's references.
+    let manager = ManuallyDrop::new(unsafe { IMFDXGIDeviceManager::from_raw(manager) });
+    let device = ManuallyDrop::new(unsafe { IUnknown::from_raw(device) });
+    if manager.ResetDevice(&*device, reset_token).is_ok() {
+        tracing::debug!("mfplat: MFResetDXGIDeviceManagerX direct reset succeeded");
+        return S_OK;
+    }
+    let Ok(d3d12) = device.cast::<ID3D12Device>() else {
+        tracing::warn!("mfplat: device manager rejected a non-D3D12 device");
+        return 0x80004005u32 as i32;
+    };
+    let luid = unsafe { d3d12.GetAdapterLuid() };
+    match unsafe { create_d3d11_bridge(Some(luid)) } {
+        Ok(bridge) => match manager.ResetDevice(&bridge, reset_token) {
+            Ok(()) => {
+                tracing::info!(
+                    adapter = format!("{:x}:{:x}", luid.HighPart, luid.LowPart),
+                    "mfplat: bridged title D3D12 device to Media Foundation D3D11 device"
+                );
+                S_OK
+            }
+            Err(error) => {
+                let hr = error.code().0;
+                tracing::warn!(hr = format_args!("{hr:#x}"), "mfplat: D3D11 bridge reset failed");
+                hr
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "mfplat: could not create D3D11 video device bridge");
+            0x80004005u32 as i32
+        }
+    }
+}
+
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "media",
         dlls: &["mfplat.dll"],
-        exports: vec![hle_export!(MFCreateSourceResolver)],
+        exports: vec![hle_export!(MFCreateSourceResolver), hle_export!(MFResetDXGIDeviceManagerX)],
     }
 }
 
