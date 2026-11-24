@@ -772,7 +772,6 @@ impl Staging {
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
     fn detile(&self, tiled: &[u8]) {
-        self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         if tiled.iter().all(|&b| b == 0) {
             tracing::debug!(
@@ -781,6 +780,11 @@ impl Staging {
                 "a sampled texture's memory is all zero (not streamed yet, or a failed BCPack read)"
             );
         }
+        // Do not publish a partially detiled frame. A failed mip/slice must
+        // not make the staging buffer eligible for a full-resource upload:
+        // that would combine newly decoded subresources with bytes left by
+        // the previous frame, which can appear as unstable video scaling or
+        // flicker when the title reuses its movie surfaces.
         for (i, (footprint, &rows)) in self.footprints.iter().zip(&self.rows).enumerate() {
             let (mip, slice) = (i as u32 % self.mips, i as u32 / self.mips);
             let f = footprint.Footprint;
@@ -794,10 +798,12 @@ impl Staging {
                 self.layout
                     .detile(tiled, mip, slice, linear, pitch, pitch * rows as usize)
             {
-                tracing::warn!(?e, mip, slice, "texture not detiled");
+                tracing::warn!(?e, mip, slice, "texture not detiled; withholding incomplete upload");
                 return;
             }
         }
+        // Publish only after every mip and array slice has been detiled.
+        self.dirty.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
