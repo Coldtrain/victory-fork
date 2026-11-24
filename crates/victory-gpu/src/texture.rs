@@ -675,15 +675,12 @@ impl Staging {
         // disable the guard entirely.
         static GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
-            && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, true))
+            && let Some((now, _written)) = waited(1, || crate::watch::writes(start, start + size, true))
         {
-            const HASH_EVERY: u64 = 1;
-            let unwritten = last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked);
+            // Keep the guard's write tracking and page protection, but do
+            // not use it to skip the content hash below: writes through an
+            // alias are invisible to this address's guard.
             last.asked = now;
-            let turn = crate::frame::current().wrapping_add((start >> 16) as u64).is_multiple_of(HASH_EVERY);
-            if unwritten && !turn {
-                return 0;
-            }
         }
         // From here on the texture's memory may be read in place. Held until
         // that read is done: the runtime changes what title memory shows
