@@ -5,6 +5,10 @@ use anyhow::{Context, Result};
 use crate::{Console, Unimplemented};
 
 #[cfg(windows)]
+#[path = "startup_ui.rs"]
+mod startup_ui;
+
+#[cfg(windows)]
 pub fn run(
     exe: &Path,
     unimplemented: Unimplemented,
@@ -147,90 +151,11 @@ pub fn run(
 }
 
 
-/// Draws a live terminal loading screen while the title discovers and
-/// precompiles the initial host shader and pipeline batch. The first host
-/// present is blocked until that batch succeeds. Enter bypasses the barrier;
-/// compilation continues in the background.
+/// Runs the native graphical loading window while the first host frame is
+/// held. The UI is independent of the emulated title's swap chain.
 #[cfg(windows)]
 fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    use std::io::{self, BufRead, Write};
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
-
-    let (continue_tx, continue_rx) = mpsc::channel();
-    let input = std::thread::Builder::new()
-        .name("victory-startup-input".into())
-        .spawn(move || {
-            let stdin = io::stdin();
-            let mut line = String::new();
-            if stdin.lock().read_line(&mut line).is_ok() && !line.is_empty() {
-                let _ = continue_tx.send(());
-            }
-        });
-
-    let precompile_disabled = std::env::var_os("VICTORY_PIPELINE_PRECOMPILE").is_some_and(|v| v == "0");
-    let mut last_discovered = 0;
-    let mut last_change = Instant::now();
-    let mut first_paint = true;
-    loop {
-        if stop.load(std::sync::atomic::Ordering::Acquire) {
-            break;
-        }
-        if continue_rx.try_recv().is_ok() {
-            victory_hle::bypass_startup_wait();
-            eprintln!("\nStartup wait bypassed; compilation continues in the background.");
-            break;
-        }
-
-        let p = victory_hle::startup_progress();
-        if p.discovered != last_discovered {
-            last_discovered = p.discovered;
-            last_change = Instant::now();
-        }
-        let settled = precompile_disabled || (p.discovery_complete
-            && p.completed >= p.discovered
-            && p.failed == 0
-            && p.queued == 0
-            && last_change.elapsed() >= Duration::from_secs(5));
-
-        let ratio = if p.discovered == 0 {
-            0.0
-        } else {
-            (p.completed as f64 / p.discovered as f64).clamp(0.0, 1.0)
-        };
-        let percent = (ratio * 100.0).round() as usize;
-        let width = 36usize;
-        let filled = (width as f64 * ratio).floor() as usize;
-        let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
-        if first_paint {
-            eprint!("\x1b[2J\x1b[H");
-            first_paint = false;
-        } else {
-            eprint!("\x1b[H");
-        }
-        eprint!(
-            "VICTORY PIPELINE PRECOMPILATION\n[{bar}] {percent:3}%  pipelines {}/{}  pending {} | failed {}\nShaders: {} discovered | {} cache hits | {} translated\nHost PSOs: {} loaded from library | {} newly compiled\nDiscovery: {}",
-            p.completed,
-            p.discovered,
-            p.queued,
-            p.failed,
-            p.shaders_discovered,
-            p.shaders_cached,
-            p.shaders_translated,
-            p.library_loaded,
-            p.library_compiled,
-            if p.failed > 0 { "pipeline failures detected; press Enter to bypass" } else if precompile_disabled { "precompilation disabled by environment" } else if p.discovery_complete { "first-frame gate active; waiting for initial pipeline batch" } else { "discovering title pipelines" },
-        );
-        if settled {
-            eprintln!("\nStartup pipeline batch compiled. Continuing.");
-            break;
-        }
-        let _ = io::stderr().flush();
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    eprint!("\x1b[2J\x1b[H");
-    let _ = io::stderr().flush();
-    drop(input);
+    startup_ui::run(stop);
 }
 
 /// The debugging aids (README): scheduled stack dumps, watched values and
