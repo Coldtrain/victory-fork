@@ -1596,11 +1596,15 @@ mod state {
         if x == 0 || y == 0 || z == 0 {
             return None;
         }
+        if x > 65_535 {
+            static TOO_MANY: std::sync::Once = std::sync::Once::new();
+            TOO_MANY.call_once(|| tracing::warn!(x, "mesh dispatch x count clamped to the D3D12 limit"));
+        }
         if y != 1 || z != 1 {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| tracing::warn!(x, y, z, "mesh dispatch has non-unit y/z; title mesh shaders use x only"));
         }
-        Some(x)
+        Some(x.min(65_535))
     }
     /// `DispatchMesh(x, y, z)` (the PC method of List6).
     pub(super) extern "system" fn dispatch_mesh(this: This, x: u32, y: u32, z: u32) {
