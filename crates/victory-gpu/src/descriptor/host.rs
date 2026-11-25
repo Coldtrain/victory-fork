@@ -319,37 +319,35 @@ impl TextureQueue {
     }
 
     /// Up to `max` slots due at `frame`, each with its write number, in
-    /// the order to serve them:
-    /// - first the ones looked at before (their memory was not mapped, or
-    ///   only part of it): the look is a query, and memory that has
-    ///   arrived since is what the title streamed in last;
-    /// - then the others, the newest write first and the oldest next, in
-    ///   turns: slot order served the low slots of a backlog of
-    ///   25,000-40,000 while the textures of the shot on screen waited
-    ///   (run 52: 98% of the drawn pixels had no colour texture in the
-    ///   first 3D frames).
+    /// the order to serve them. Alternate retries with first looks so a
+    /// backlog of unmapped or partial textures cannot use the whole pass.
+    /// Among first looks, take the newest and oldest writes in turns.
     fn due(&self, frame: u64, max: usize) -> Vec<(u32, u64)> {
-        let mut again: Vec<(u64, u32, u64)> = Vec::new();
-        let mut fresh: Vec<(u64, u32, u64)> = Vec::new();
+        let mut again = Vec::new();
+        let mut fresh = Vec::new();
         for (&index, w) in self.slots.iter().filter(|(_, w)| w.due <= frame) {
             let class = if w.looks > 0 || w.mapped > 0 { &mut again } else { &mut fresh };
-            class.push((w.written, index, w.write));
+            class.push((index, w.write));
         }
-        // By the number of the write, counted over the run.
-        let newest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| b.2.cmp(&a.2);
-        again.sort_unstable_by(newest_first);
-        fresh.sort_unstable_by(newest_first);
-        let mut order: Vec<(u32, u64)> = again.iter().map(|&(_, index, write)| (index, write)).collect();
-        let (mut new, mut old) = (0, fresh.len());
-        while new < old && order.len() < max {
-            order.push((fresh[new].1, fresh[new].2));
-            new += 1;
-            if new < old && order.len() < max {
-                old -= 1;
-                order.push((fresh[old].1, fresh[old].2));
+        again.sort_unstable_by_key(|&(_, write)| write);
+        fresh.sort_unstable_by_key(|&(_, write)| write);
+        let count = max.min(again.len() + fresh.len());
+        let mut fresh = fresh.into_iter();
+        // A time-limited pass may stop after one slot. Rotate its first
+        // choice across frames as well as rotating within each pass.
+        let mut retry = frame & 1 == 0;
+        let mut newest = again.is_empty() || frame & 2 == 0;
+        let mut order = Vec::with_capacity(count);
+        while order.len() < count {
+            if !again.is_empty() && (retry || fresh.len() == 0) {
+                order.push(again.pop().unwrap());
+            } else {
+                let next = if newest { fresh.next_back() } else { fresh.next() };
+                order.push(next.unwrap());
+                newest = !newest;
             }
+            retry = !retry;
         }
-        order.truncate(max);
         order
     }
 
@@ -2297,6 +2295,29 @@ mod tests {
     /// slot whose memory is not there is looked at again after
     /// 1, 2, 4 frames up to the limit; and what the pass reports about a
     /// slot written again meanwhile is dropped.
+    #[test]
+    fn texture_queue_alternates_retries_and_first_looks_under_a_small_budget() {
+        let mut q = TextureQueue::default();
+        for index in 0..10 {
+            q.written(index, 0, 0, false);
+        }
+        for (index, write) in q.due(0, 10) {
+            q.later(index, write, 0, 4);
+        }
+        for index in 10..20 {
+            q.written(index, 1, 1, false);
+        }
+        let slots = |frame, max| q.due(frame, max).into_iter().map(|d| d.0).collect::<Vec<_>>();
+        assert_eq!(slots(1, 4), [19, 9, 10, 8]);
+        assert_eq!(slots(2, 4), [9, 10, 8, 19]);
+        // If time or bytes run out after one item, both classes get a
+        // first turn; old and newly written first-look slots do as well.
+        assert_eq!(slots(3, 1), [10]);
+        assert_eq!(slots(4, 1), [9]);
+        assert_eq!(slots(5, 1), [19]);
+        assert!(slots(5, 0).is_empty());
+    }
+
     #[test]
     fn the_texture_queue_serves_the_newest_writes_first() {
         let mut q = TextureQueue::default();
