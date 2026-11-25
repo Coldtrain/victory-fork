@@ -327,6 +327,20 @@ fn mesh_kept(pipeline: usize) -> bool {
 
 /// Draws recorded on the host GPU since the last frame line.
 static DRAWN: AtomicU64 = AtomicU64::new(0);
+/// Direct native mesh dispatches, indirect mesh submissions, and traditional
+/// graphics draw submissions since the last frame line.
+static DIRECT_MESH_DISPATCHES: AtomicU64 = AtomicU64::new(0);
+static INDIRECT_MESH_SUBMISSIONS: AtomicU64 = AtomicU64::new(0);
+static GRAPHICS_DRAW_SUBMISSIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Takes render submission counts since the previous frame-rate line.
+pub(crate) fn take_render_counts() -> (u64, u64, u64) {
+    (
+        DIRECT_MESH_DISPATCHES.swap(0, Ordering::Relaxed),
+        INDIRECT_MESH_SUBMISSIONS.swap(0, Ordering::Relaxed),
+        GRAPHICS_DRAW_SUBMISSIONS.swap(0, Ordering::Relaxed),
+    )
+}
 
 /// Draws run on the host so far.
 pub(crate) fn drawn() -> u64 {
@@ -2314,6 +2328,7 @@ impl State {
                     // SAFETY: an open list with everything set.
                     unsafe { l6.DispatchMesh(x, 1, 1) };
                     self.mesh_scissor(list, false);
+                    DIRECT_MESH_DISPATCHES.fetch_add(1, Ordering::Relaxed);
                     DRAWN.fetch_add(1, Ordering::Relaxed);
                     true
                 }
@@ -2713,6 +2728,7 @@ impl State {
                 list.list
                     .DrawInstanced(count, instances, from, first_instance)
             };
+            GRAPHICS_DRAW_SUBMISSIONS.fetch_add(1, Ordering::Relaxed);
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
@@ -2814,6 +2830,7 @@ impl State {
                 list.list
                     .DrawIndexedInstanced(indices, instances, first, base, first_instance)
             };
+            GRAPHICS_DRAW_SUBMISSIONS.fetch_add(1, Ordering::Relaxed);
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         if !ran {
@@ -3052,6 +3069,11 @@ impl State {
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
         } else {
+            if kind == MESH {
+                INDIRECT_MESH_SUBMISSIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                GRAPHICS_DRAW_SUBMISSIONS.fetch_add(1, Ordering::Relaxed);
+            }
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
         true
