@@ -3058,9 +3058,6 @@ impl State {
     }
 }
 
-/// The host command signature for one argument of `kind` with records
-/// `stride` bytes apart (no root arguments, so no root signature), made
-/// once.
 /// Where a compute pipeline's program takes the number of its first
 /// thread group (USER_GROUP_BASE): the root parameter of its user data and
 /// the dword in it.
@@ -3072,6 +3069,8 @@ fn group_base(p: &HostPipeline) -> Option<(u32, u32)> {
     Some((param, word.index))
 }
 
+/// The host command signature for one argument of kind with records
+/// stride bytes apart (no root arguments, so no root signature), made once.
 fn host_signature(kind: u32, stride: u32) -> Option<ID3D12CommandSignature> {
     static MADE: std::sync::Mutex<Vec<((u32, u32), ID3D12CommandSignature)>> =
         std::sync::Mutex::new(Vec::new());
