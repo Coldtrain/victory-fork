@@ -137,7 +137,7 @@ unsafe extern "system" fn window_proc(
             let stable = LAST_CHANGE.get_or_init(|| std::sync::Mutex::new(Instant::now()))
                 .lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= Duration::from_secs(5);
             if precompile_disabled || (
-                p.discovery_complete && p.completed >= p.discovered && p.failed == 0
+                p.discovery_complete && p.completed >= p.discovered
                 && p.queued == 0 && stable
             ) {
                 unsafe { DestroyWindow(hwnd) };
