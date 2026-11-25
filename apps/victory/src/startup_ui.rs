@@ -1,6 +1,4 @@
-//! Native Win32 shader/pipeline loading window. It is independent of the
-//! emulated title's swap chain, so it remains visible while the first title
-//! frame is held at the host-present barrier.
+//! Native Win32 loading overlay parented to the emulated title's main window.
 
 use std::sync::{
     Arc, OnceLock,
@@ -20,7 +18,7 @@ use windows_sys::Win32::{
         DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics, IDC_ARROW,
         LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
         TranslateMessage, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
-        WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        WM_TIMER, WNDCLASSW, WS_CHILD, WS_VISIBLE,
         SM_CXSCREEN, SM_CYSCREEN,
     }},
 };
@@ -187,11 +185,23 @@ pub(super) fn run(stop: Arc<AtomicBool>) {
             ..std::mem::zeroed()
         };
         if RegisterClassW(&wc) == 0 { return; }
+        // Wait for the first host present to create the actual game window.
+        // The pipeline barrier holds that present, leaving this thread free to
+        // attach the loading UI as a child of the game window.
+        let parent = loop {
+            if STOP.get().is_some_and(|s| s.load(Ordering::Acquire)) {
+                return;
+            }
+            if let Some(parent) = victory_hle::startup_parent_window() {
+                break parent as HWND;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
         let x = (GetSystemMetrics(SM_CXSCREEN) - WIDTH) / 2;
         let y = (GetSystemMetrics(SM_CYSCREEN) - HEIGHT) / 2;
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST, class.as_ptr(), title.as_ptr(), WS_POPUP | WS_VISIBLE,
-            x.max(0), y.max(0), WIDTH, HEIGHT, std::ptr::null_mut(),
+            0, class.as_ptr(), title.as_ptr(), WS_CHILD | WS_VISIBLE,
+            x.max(0), y.max(0), WIDTH, HEIGHT, parent,
             std::ptr::null_mut(), instance, std::ptr::null(),
         );
         if hwnd.is_null() { return; }
