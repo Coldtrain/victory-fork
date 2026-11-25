@@ -50,7 +50,7 @@ fn label(hdc: HDC, x: i32, y: i32, value: &str, color: u32, size: i32, bold: boo
     let text = wide(value);
     unsafe {
         let font = windows_sys::Win32::Graphics::Gdi::CreateFontW(
-            -size, 0, 0, 0, if bold { 700 } else { 400 }, 0, 0, 0, 1, 0, 0,  ClearType(),
+            -size, 0, 0, 0, if bold { 700 } else { 400 }, 0, 0, 0, 1, 0, 0,  clear_type(),
             0, wide("Segoe UI").as_ptr(),
         );
         let old = SelectObject(hdc, font);
@@ -62,7 +62,7 @@ fn label(hdc: HDC, x: i32, y: i32, value: &str, color: u32, size: i32, bold: boo
     }
 }
 
-fn ClearType() -> u32 { 5 }
+fn clear_type() -> u32 { 5 }
 
 fn draw(hwnd: HWND) {
     let p = victory_hle::startup_progress();
@@ -149,7 +149,7 @@ unsafe extern "system" fn window_proc(
             unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
             0
         }
-        WM_KEYDOWN if wparam as u32 == VK_RETURN => {
+        WM_KEYDOWN if wparam as u32 == VK_RETURN as u32 => {
             BYPASSED.store(true, Ordering::Release);
             victory_hle::bypass_startup_wait();
             unsafe { DestroyWindow(hwnd) };
