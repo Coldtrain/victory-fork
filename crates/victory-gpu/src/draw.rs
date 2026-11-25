@@ -330,10 +330,10 @@ pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0
 /// Time inside indexed-texture preparation: [queue/remap, slot lookup and mapping, host mirror and view classification, staging/readable checks, total upload loop].
 pub(crate) static HEAP_TEXTURE_PHASES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 /// Fine-grained texture-pass timings: descriptor decode, mapped-page query,
-/// host descriptor mirror, staging metadata, and descriptor readability check.
+/// host descriptor mirror, resource metadata, readability, and staged-page check.
 pub(crate) static HEAP_TEXTURE_DETAIL: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 /// Counts since the last detailed report: due, examined, placed, unmapped,
-/// partial, mirrored, and uploaded texture slots.
+/// partial, mirrored, uploaded, and tabled texture slots.
 pub(crate) static HEAP_TEXTURE_COUNTS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 struct HeapPhaseTimer<'a> {
     counter: &'a AtomicU64,
@@ -1709,7 +1709,14 @@ impl State {
                 return;
             }
             let staged_started = std::time::Instant::now();
-            let (bytes, whole) = crate::texture::staged(resource).unwrap_or((0, true));
+            // For placed textures, mapped_bytes above already established
+            // that only part of the view's title memory is resident. Do not
+            // scan the same pages again in staged() merely to learn !whole.
+            let (bytes, whole) = if partly.is_some() {
+                (crate::texture::staged_bytes(resource).unwrap_or(0), false)
+            } else {
+                crate::texture::staged(resource).unwrap_or((0, true))
+            };
             HEAP_TEXTURE_DETAIL[5].fetch_add(staged_started.elapsed().as_micros() as u64, Ordering::Relaxed);
             // Not all of it there: looked at again next frame, and from
             // then on as a slot with nothing new (a placed texture: until
