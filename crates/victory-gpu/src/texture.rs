@@ -983,12 +983,16 @@ pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
     // Streaming can commit only interior mip pages while both ends of the
     // texture remain reserved. The old endpoint shortcut treated that valid
     // state as wholly absent and repeatedly skipped the texture.
+    let query = by_query();
     let ends_missing =
-        !committed(at, 1) && !committed((end - 1) as *const u8, 1);
+        !query && !committed(at, 1) && !committed((end - 1) as *const u8, 1);
     if ends_missing && (end - 1) / 4096 - start / 4096 <= 1 {
         return 0;
     }
-    if !by_query() {
+    // The fast working-set probes sample only one page per 64 KiB block.
+    // If both endpoints are absent, use VirtualQuery to find interior mips
+    // rather than incorrectly treating the whole allocation as absent.
+    if !query && !ends_missing {
         static BY_PAGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *BY_PAGE.get_or_init(|| std::env::var_os("VICTORY_MAPPED_BY_PAGE").is_some_and(|v| v == "1")) {
             // By page, without the walk: whole pages, cut to the range.
@@ -1100,6 +1104,23 @@ fn staging(resource: This, texture: &ID3D12Resource) -> Option<Arc<Staging>> {
 #[cfg(test)]
 mod title_memory_tests {
     use super::with_title;
+
+    #[test]
+    fn a_texture_with_only_interior_pages_counts_its_resident_bytes() {
+        use windows_sys::Win32::System::Memory::*;
+        const BLOCK: usize = 64 << 10;
+        // SAFETY: this private reservation is ours throughout the test.
+        unsafe {
+            let base = VirtualAlloc(std::ptr::null(), 5 * BLOCK, MEM_RESERVE, PAGE_NOACCESS).cast::<u8>();
+            assert!(!base.is_null());
+            let middle = base.add(2 * BLOCK);
+            assert_eq!(VirtualAlloc(middle.cast(), BLOCK, MEM_COMMIT, PAGE_READWRITE), middle.cast());
+            assert_eq!(super::mapped_bytes(base, 5 * BLOCK), BLOCK as u64);
+            assert_ne!(VirtualFree(middle.cast(), BLOCK, MEM_DECOMMIT), 0);
+            assert_eq!(super::mapped_bytes(base, 5 * BLOCK), 0);
+            assert_ne!(VirtualFree(base.cast(), 0, MEM_RELEASE), 0);
+        }
+    }
 
     /// Title memory whose tail is reserved and not committed reads through
     /// the copy as its bytes and then zeros, without a fault; so does
