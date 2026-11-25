@@ -568,7 +568,25 @@ fn merge_piece(now: &[u8], held: &mut [u8], title: &mut [u8]) -> bool {
 
 /// `[from, to)` without the ranges of `skip`, in order.
 fn outside(from: usize, to: usize, mut skip: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    outside_reuse(from, to, &mut skip)
+    skip.sort_unstable();
+    let mut out = Vec::new();
+    let mut at = from;
+    for (a, b) in skip {
+        if b <= at {
+            continue;
+        }
+        if a >= to {
+            break;
+        }
+        if a > at {
+            out.push((at, a));
+        }
+        at = at.max(b);
+    }
+    if at < to {
+        out.push((at, to));
+    }
+    out
 }
 
 #[cfg(test)]
