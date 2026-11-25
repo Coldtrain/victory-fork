@@ -456,8 +456,9 @@ const LIBRARY_FILE: &str = "host-pipelines.bin";
 /// start renames it over the library first ([`Blob::of`]).
 const NEXT_FILE: &str = "host-pipelines.next";
 const EARLY_FILE: &str = "early-pipelines.txt";
-/// Title pipelines listed for an early start, at most.
-const EARLY_MAX: usize = 8192;
+/// Title pipelines listed for an early start, at most. Keep enough room for
+/// large titles whose first run touches tens of thousands of PSO variants.
+const EARLY_MAX: usize = 65_536;
 
 fn library() -> Option<&'static Library> {
     static LIBRARY: OnceLock<Option<Library>> = OnceLock::new();
