@@ -55,9 +55,34 @@ use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::{HSTRING, Interface, PCWSTR};
 
+// An explicit directory supplied by the embedding application takes
+// precedence over the automatic per-user cache directory. Keep the default
+// separate so an early shader lookup cannot prevent the application from
+// selecting its own directory later during startup.
 static DIR: OnceLock<PathBuf> = OnceLock::new();
+static DEFAULT_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+fn cache_dir() -> &'static PathBuf {
+    DIR.get().unwrap_or_else(|| {
+        DEFAULT_DIR.get_or_init(|| {
+            let dir = std::env::var_os("VICTORY_PIPELINE_CACHE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("LOCALAPPDATA")
+                        .map(PathBuf::from)
+                        .map(|path| path.join("Victory").join("PipelineCache"))
+                })
+                .unwrap_or_else(|| std::env::temp_dir().join("Victory").join("PipelineCache"));
+            tracing::info!(path = %dir.display(), "using persistent host pipeline cache");
+            dir
+        })
+    })
+}
 
 /// Keeps the pipeline library and the early list in `dir` from now on.
+/// Must be called before the first host pipeline is created. If it is not
+/// called, a persistent per-user directory is selected automatically.
 pub fn use_pipeline_cache(dir: PathBuf) {
     let _ = DIR.set(dir);
 }
@@ -439,7 +464,8 @@ fn library() -> Option<&'static Library> {
     LIBRARY
         .get_or_init(|| {
             let device = crate::host::host()?.device.cast::<ID3D12Device1>().ok()?;
-            let blob = DIR.get().map_or(Blob::None, |d| Blob::of(d));
+            let dir = cache_dir();
+            let blob = Blob::of(dir);
             let library = open(&device, blob);
             if library.is_none() {
                 tracing::warn!("no host pipeline library: pipelines are not kept");
@@ -566,7 +592,7 @@ pub(crate) fn pipeline(
 pub(crate) fn save(now: bool) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
-    let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
+    let (dir, Some(library)) = (cache_dir(), library()) else { return };
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
@@ -682,10 +708,7 @@ static USED_CHANGED: AtomicBool = AtomicBool::new(false);
 fn used() -> std::sync::MutexGuard<'static, Option<HashSet<String>>> {
     let mut used = USED.lock().unwrap_or_else(|e| e.into_inner());
     if used.is_none() {
-        let listed = DIR
-            .get()
-            .and_then(|d| std::fs::read_to_string(d.join(EARLY_FILE)).ok())
-            .unwrap_or_default();
+        let listed = std::fs::read_to_string(cache_dir().join(EARLY_FILE)).unwrap_or_default();
         let set: HashSet<String> = listed.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect();
         tracing::info!(pipelines = set.len(), "title pipelines to start early");
         *used = Some(set);
