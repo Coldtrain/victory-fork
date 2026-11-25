@@ -23,6 +23,11 @@ use std::time::{Duration, Instant};
 use super::Shader;
 use super::host::{GraphicsState, HostPipeline};
 
+/// Pipeline descriptions discovered and host PSOs completed in this run.
+pub(crate) static DISCOVERED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static COMPLETED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static FAILED: AtomicU64 = AtomicU64::new(0);
+
 /// What a host pipeline is made from, and the host pipeline once made.
 pub(crate) struct Pending {
     shaders: Vec<Arc<Shader>>,
@@ -43,6 +48,10 @@ unsafe impl Sync for Pending {}
 
 impl Pending {
     pub(crate) fn new(shaders: Vec<Arc<Shader>>, graphics: Option<Box<GraphicsState>>) -> Pending {
+        // Empty pipeline descriptions have no host PSO to compile.
+        if !shaders.is_empty() {
+            DISCOVERED.fetch_add(1, Ordering::Relaxed);
+        }
         let mut key = blake3::Hasher::new();
         for s in &shaders {
             key.update(s.stage.as_bytes());
@@ -60,8 +69,16 @@ impl Pending {
     }
 
     fn make(&self) {
-        self.made
-            .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
+        self.made.get_or_init(|| {
+            let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
+            if !self.shaders.is_empty() {
+                if made.is_none() {
+                    FAILED.fetch_add(1, Ordering::Relaxed);
+                }
+                COMPLETED.fetch_add(1, Ordering::Relaxed);
+            }
+            made
+        });
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
