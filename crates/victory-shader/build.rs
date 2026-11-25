@@ -38,6 +38,15 @@ fn main() {
         hash.update(&[0]);
     }
 
+    // Translator dependency updates can change emitted code too. Include
+    // the workspace lockfile, while excluding unrelated application sources.
+    let lockfile = root.join("../../Cargo.lock");
+    if lockfile.is_file() {
+        println!("cargo:rerun-if-changed={}", lockfile.display());
+        hash.update(b"workspace-Cargo.lock");
+        hash.update(&std::fs::read(lockfile).expect("read workspace lockfile"));
+    }
+
     let target = std::env::var("TARGET").unwrap_or_default();
     let diagnostics = std::env::var_os("CARGO_FEATURE_DIAGNOSTICS").is_some();
     hash.update(target.as_bytes());
