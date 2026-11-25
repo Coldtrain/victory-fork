@@ -1489,21 +1489,15 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-/// Whether the pieces hashed again after ranges were sent up to a copy in
-/// the card's memory are hashed in runs of pieces that touch, each piece
-/// once (`VICTORY_CARD_REHASH_RUNS=1`; off by default), and not in a pass
-/// per range sent up.
+/// Hash pieces touched by title-memory sends in joined runs, once per
+/// piece, rather than dispatching a separate pass for every sent range.
 ///
-/// These passes are ours, they run on the card before every submission's
-/// lists, and no timing so far names them: each walks its 64 KiB pieces
-/// 16 bytes at a time, 4,096 steps one after the other, so a pass takes
-/// the time of one piece however few its pieces are. Run 102 sent up 514
-/// ranges a frame: 514 such passes. The same pieces are hashed either way;
-/// a piece hashed when it need not be, or not hashed when it should, costs
-/// a fetch that finds nothing and loses no shader write.
+/// This is the default because the ranges frequently overlap the same
+/// 64 KiB pieces: the latest profile had 188 passes over 1,184 pieces per
+/// frame. Joining preserves the exact set of pieces hashed (see
+/// `shadow::joined_piece_runs`), while removing redundant dispatches.
 fn rehash_runs() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_REHASH_RUNS").is_some_and(|v| v == "1"))
+    true
 }
 
 /// Since the last frame-rate line, of our own passes over copies in the
