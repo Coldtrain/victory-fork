@@ -575,6 +575,23 @@ impl State {
     pub(crate) fn set_scissors(&mut self, list: &HostList, rects: &[RECT]) {
         self.scissors.clear();
         self.scissors.extend_from_slice(rects);
+        // Keep the guest state visible while diagnosing world geometry that
+        // disappears only under normal clipping. The host call below is a
+        // pass-through; logging both arrays lets us compare the guest's
+        // scissor coordinate space with the active viewport without
+        // changing rasterization.
+        #[cfg(feature = "diagnostics")]
+        {
+            static SEEN: AtomicU64 = AtomicU64::new(0);
+            if SEEN.fetch_add(1, Ordering::Relaxed) < 96 {
+                tracing::debug!(
+                    scissors = ?rects,
+                    viewports = ?self.viewports,
+                    targets = ?self.targets,
+                    "title rasterizer scissor state"
+                );
+            }
+        }
         if scissor_test() {
             // The experiment: every rectangle the title sets is widened to
             // the largest target there is, so nothing is cut by one. What
