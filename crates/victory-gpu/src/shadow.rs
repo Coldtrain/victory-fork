@@ -935,30 +935,21 @@ unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
     });
 }
 
-/// Whether the snapshots of a submission's shader-written ranges, and the
-/// compare that finds what the shaders wrote, run on several threads
-/// across ranges (`VICTORY_WIDE_BACK=1`; off by default).
+/// Whether snapshots of shader-written ranges and the later comparison
+/// of those ranges use the persistent parallel worker pool.
 ///
-/// Both ran range by range on the submitting thread, a range on several
-/// threads only if it was 16 MiB or more. The ranges left on the CPU's side
-/// since the big buffers went to the card are small and many: in run 86,
-/// 7,024 declared ranges a frame, 375 MB of them compared after the card
-/// ran in 563 pieces of work, none of 16 MiB: 51 ms a frame of snapshots
-/// and 35 ms of comparing, one thread, bound by one core's memory speed.
+/// This is enabled unconditionally: the serial path copied and compared
+/// thousands of small ranges on the submission thread, despite the worker
+/// pool already having bounded, persistent workers and preserving the
+/// exact same byte ranges and snapshot boundaries. Snapshot collection is
+/// deferred only until the submission's refreshes have completed; the
+/// command lists are not submitted until the snapshots finish. The parallel
+/// compare likewise completes before the existing merge writes title memory.
 ///
-/// With the switch a submission's snapshots are noted as it is prepared
-/// and taken together when its refreshes are done, just before it goes to
-/// the card ([`take_snapshots`]), and the compares of everything declared
-/// run together after the card ([`find_all`]), both cut into pieces of
-/// work of about 1 MiB for a few threads that are kept ([`wide`]). The
-/// bytes taken and the bytes compared are the same ones: a range's bytes
-/// cannot change between the moment it is declared and the end of the
-/// preparing (a declared range is left alone by every refresh, the title's
-/// own copies write title memory and not the copy, and the card runs the
-/// lists only afterwards).
+/// Keep this as a code-level policy rather than a runtime tuning switch:
+/// the serial and parallel paths must have identical correctness semantics.
 pub(crate) fn wide_back() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_BACK").is_some_and(|v| v == "1"))
+    true
 }
 
 type Job = Box<dyn FnOnce() + Send>;
