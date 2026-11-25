@@ -5731,7 +5731,7 @@ impl Meter {
                 .map(|phase| phase.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames)
                 .collect();
             tracing::info!(
-                "indexed heap preparation per frame: {:.1} ms descriptor-slot mirroring, {:.1} ms span aggregation, {:.1} ms buffer refreshes, {:.1} ms indexed-texture uploads; texture pass: {:.1} ms queue/remap, {:.1} ms slot lookup/mapping, {:.1} ms mirror/classification, {:.1} ms staging/readable checks, {:.1} ms total loop",
+                "indexed heap preparation per frame: {:.1} ms descriptor-slot mirroring, {:.1} ms span aggregation, {:.1} ms buffer refreshes, {:.1} ms indexed-texture uploads; texture pass: {:.1} ms due-queue census, {:.1} ms slot lookup/mapping, {:.1} ms mirror/classification, {:.1} ms staging/readable checks, {:.1} ms total loop",
                 heap_phases[0], heap_phases[1], heap_phases[2], heap_phases[3],
                 texture_phases[0], texture_phases[1], texture_phases[2], texture_phases[3], texture_phases[4]
             );
