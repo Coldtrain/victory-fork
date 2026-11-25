@@ -39,6 +39,3 @@ windows = { workspace = true, features = [
 
 [lints]
 workspace = true
-
-[build-dependencies]
-blake3.workspace = true
