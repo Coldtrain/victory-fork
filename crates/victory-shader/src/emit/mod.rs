@@ -118,13 +118,6 @@ pub use shader::{
     set_view_heap_limit,
 };
 
-/// Stable build-time fingerprint of the translator implementation and
-/// configuration. The embedding GPU crate uses this to key translated
-/// shaders without invalidating them on unrelated executable rebuilds.
-pub fn translator_fingerprint() -> &'static str {
-    env!("VICTORY_SHADER_TRANSLATOR_FINGERPRINT")
-}
-
 /// The loop limit without an override: 2^20.
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 
