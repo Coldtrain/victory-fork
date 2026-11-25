@@ -568,10 +568,15 @@ fn merge_piece(now: &[u8], held: &mut [u8], title: &mut [u8]) -> bool {
 
 /// `[from, to)` without the ranges of `skip`, in order.
 fn outside(from: usize, to: usize, mut skip: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    outside_reuse(from, to, &mut skip)
+}
+
+/// As `outside`, sorting the caller's reusable scratch vector in place.
+fn outside_reuse(from: usize, to: usize, skip: &mut Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     skip.sort_unstable();
     let mut out = Vec::new();
     let mut at = from;
-    for (a, b) in skip {
+    for &(a, b) in skip.iter() {
         if b <= at {
             continue;
         }
@@ -2635,7 +2640,7 @@ impl Shadow {
         title.resize(n, 0);
         let mapped = crate::host::read_into((start + at) as *const u8, title);
         let mut changed = false;
-        for (a, b) in outside(at, at + n, skip) {
+        for (a, b) in outside_reuse(at, at + n, skip) {
             let (a, b) = (a - at, b - at);
             // Title memory that is not mapped: the CPU's side keeps what
             // the card wrote, as before; `title` is scratch then.
