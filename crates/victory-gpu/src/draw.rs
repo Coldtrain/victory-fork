@@ -1569,9 +1569,9 @@ impl State {
             // the same slot again below before mirroring it.
             let handle = heap.handle(index);
             let title_view = handle.and_then(crate::descriptor::view);
-            if let Some(View::Placed(false, _, desc)) = title_view.as_ref() {
+            if let Some(View::Placed(false, resource_desc, desc)) = title_view.as_ref() {
                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
-                let len = crate::resource::placed_bytes(desc).unwrap_or(1);
+                let len = crate::resource::placed_bytes(resource_desc).unwrap_or(1);
                 let mapped = crate::texture::mapped_bytes(address as *const u8, len as usize);
                 if mapped == 0 {
                     HEAP_TEXTURES_AWAY.fetch_add(1, Ordering::Relaxed);
