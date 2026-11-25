@@ -772,8 +772,8 @@ pub(crate) fn startup_wait_before_present() {
         let completed = make::COMPLETED.load(Ordering::Acquire);
         let failed = make::FAILED.load(Ordering::Acquire);
         let queued = make::waiting();
-        if completed >= discovered && failed == 0 && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
-            tracing::info!(discovered, completed, "initial pipeline batch compiled before first present");
+        if completed >= discovered && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(discovered, completed, failed, "initial pipeline batch finished before first present");
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
