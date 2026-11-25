@@ -804,6 +804,12 @@ pub(crate) fn is_staged(resource: This) -> bool {
     map.as_ref().is_some_and(|map| map.contains_key(&(resource as usize)))
 }
 
+/// The staged size of a title texture, without querying its title-memory pages.
+pub(crate) fn staged_bytes(resource: This) -> Option<u64> {
+    let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
+    Some(map.as_ref()?.get(&(resource as usize))?.layout.size as u64)
+}
+
 /// The bytes of a title texture's memory, and whether all of it is mapped,
 /// if the texture has been staged for upload.
 pub(crate) fn staged(resource: This) -> Option<(u64, bool)> {
