@@ -124,11 +124,106 @@ pub fn run(
     }));
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
+
+    // The title must keep running to discover pipeline descriptions. Show
+    // live compilation progress alongside it rather than blocking the title
+    // thread that creates those descriptions.
+    let stop_progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_stop = stop_progress.clone();
+    let progress = std::thread::Builder::new()
+        .name("victory-startup-progress".into())
+        .spawn(move || startup_progress_screen(progress_stop))
+        .ok();
+
     let code = main
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
+    stop_progress.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(progress) = progress {
+        let _ = progress.join();
+    }
     println!("title exited with {code}");
     Ok(())
+}
+
+
+/// Draws a live terminal loading screen while the title discovers and
+/// precompiles its host shaders and pipelines. Enter dismisses the screen;
+/// background compilation continues. The screen also closes automatically
+/// after first-present discovery has gone quiet and all queued work drains.
+#[cfg(windows)]
+fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    use std::io::{self, BufRead, Write};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let input = std::thread::Builder::new()
+        .name("victory-startup-input".into())
+        .spawn(move || {
+            let stdin = io::stdin();
+            let mut line = String::new();
+            if stdin.lock().read_line(&mut line).is_ok() && !line.is_empty() {
+                let _ = continue_tx.send(());
+            }
+        });
+
+    let mut last_discovered = 0;
+    let mut last_change = Instant::now();
+    let mut shown = false;
+    loop {
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            break;
+        }
+        if continue_rx.try_recv().is_ok() {
+            eprintln!("\nStartup precompilation continues in the background.");
+            break;
+        }
+
+        let p = victory_hle::startup_progress();
+        if p.discovered != last_discovered {
+            last_discovered = p.discovered;
+            last_change = Instant::now();
+        }
+        let settled = p.discovery_complete
+            && p.completed >= p.discovered
+            && p.queued == 0
+            && last_change.elapsed() >= Duration::from_secs(1);
+
+        let ratio = if p.discovered == 0 {
+            0.0
+        } else {
+            (p.completed as f64 / p.discovered as f64).clamp(0.0, 1.0)
+        };
+        let percent = (ratio * 100.0).round() as usize;
+        let width = 36usize;
+        let filled = (width as f64 * ratio).floor() as usize;
+        let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
+        eprint!(
+            "\rVICTORY PIPELINE PRECOMPILATION\n[{bar}] {percent:3}%  pipelines {}/{}  pending {}\nShaders: {} discovered | {} cache hits | {} translated\nHost PSOs: {} loaded from library | {} newly compiled\nDiscovery: {}",
+            p.completed,
+            p.discovered,
+            p.queued,
+            p.shaders_discovered,
+            p.shaders_cached,
+            p.shaders_translated,
+            p.library_loaded,
+            p.library_compiled,
+            if p.discovery_complete { "first frame presented; waiting for pipeline queue to drain" } else { "discovering title pipelines" },
+        );
+        if settled {
+            eprintln!("\nStartup pipeline batch compiled. Continuing.");
+            shown = true;
+            break;
+        }
+        shown = true;
+        let _ = io::stderr().flush();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if shown {
+        eprintln!();
+    }
+    drop(input);
 }
 
 /// The debugging aids (README): scheduled stack dumps, watched values and
