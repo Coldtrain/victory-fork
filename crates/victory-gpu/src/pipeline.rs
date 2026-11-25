@@ -754,7 +754,11 @@ pub(crate) fn startup_wait_before_present() {
         return;
     }
 
-    let queued_for_startup = make::precompile_startup_batch();
+    // Pipeline creation can continue on title worker threads after the first
+    // present is intercepted. Drain the startup registry repeatedly: taking
+    // it only once leaves later discoveries counted in DISCOVERED but never
+    // queued, so the completion barrier can wait forever on them.
+    let mut queued_for_startup = make::precompile_startup_batch();
     tracing::info!(discovered = make::DISCOVERED.load(Ordering::Acquire), queued_for_startup, "queued startup pipeline precompilation batch");
 
     let mut last_discovered = make::DISCOVERED.load(Ordering::Acquire);
@@ -764,6 +768,16 @@ pub(crate) fn startup_wait_before_present() {
             tracing::warn!("startup pipeline compilation wait bypassed by user");
             return;
         }
+
+        // Include descriptions created by other title threads while the
+        // first-present barrier is waiting. start() is idempotent for
+        // pipelines already queued, being made, or completed.
+        let newly_queued = make::precompile_startup_batch();
+        queued_for_startup += newly_queued;
+        if newly_queued > 0 {
+            tracing::info!(newly_queued, queued_for_startup, "queued additional startup pipelines");
+        }
+
         let discovered = make::DISCOVERED.load(Ordering::Acquire);
         if discovered != last_discovered {
             last_discovered = discovered;
@@ -773,7 +787,7 @@ pub(crate) fn startup_wait_before_present() {
         let failed = make::FAILED.load(Ordering::Acquire);
         let queued = make::waiting();
         if completed >= discovered && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
-            tracing::info!(discovered, completed, failed, "initial pipeline batch finished before first present");
+            tracing::info!(discovered, completed, failed, queued_for_startup, "initial pipeline batch finished before first present");
             return;
         }
         std::thread::sleep(Duration::from_millis(50));
