@@ -27,6 +27,8 @@ use super::host::{GraphicsState, HostPipeline};
 /// complete even when translation or host PSO creation fails.
 pub(crate) static DISCOVERED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static COMPLETED: AtomicU64 = AtomicU64::new(0);
+/// Discovered pipeline descriptions whose host PSO could not be created.
+pub(crate) static FAILED: AtomicU64 = AtomicU64::new(0);
 
 /// What a host pipeline is made from, and the host pipeline once made.
 pub(crate) struct Pending {
@@ -72,6 +74,9 @@ impl Pending {
     fn make(&self) {
         self.made.get_or_init(|| {
             let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
+            if made.is_none() {
+                FAILED.fetch_add(1, Ordering::Relaxed);
+            }
             COMPLETED.fetch_add(1, Ordering::Relaxed);
             made
         });
