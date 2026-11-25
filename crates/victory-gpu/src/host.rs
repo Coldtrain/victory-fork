@@ -2820,14 +2820,14 @@ fn hand_back(back: &[Declared]) {
 }
 
 impl Host {
-    /// Whether the host runs mesh shaders at shader model 6.6 (translated
-    /// mesh shaders need both); logged once.
+    /// Whether the host supports native D3D12 mesh shaders (mesh shader tier
+    /// 1 and shader model 6.5); logged once.
     pub(crate) fn mesh_shaders(&self) -> bool {
         static MESH: OnceLock<bool> = OnceLock::new();
         *MESH.get_or_init(|| {
             let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS7::default();
             let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
-                HighestShaderModel: D3D_SHADER_MODEL_6_6,
+                HighestShaderModel: D3D_SHADER_MODEL_6_5,
             };
             // SAFETY: each query writes its own structure of the given size.
             let ok = unsafe {
@@ -2849,8 +2849,8 @@ impl Host {
             };
             let mesh = ok
                 && options.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED
-                && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0;
-            tracing::info!(mesh, "host mesh shader support");
+                && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_5.0;
+            tracing::info!(mesh, mesh_shader_tier = options.MeshShaderTier.0, highest_shader_model = model.HighestShaderModel.0, "host mesh shader support");
             mesh
         })
     }
