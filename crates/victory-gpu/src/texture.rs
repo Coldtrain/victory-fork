@@ -280,30 +280,16 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
 }
 
 /// Whether a texture refresh that finds the runtime remapping title memory
-/// goes on without waiting for it (`VICTORY_TEXTURE_NO_WAIT=1`; off by
-/// default).
+/// goes on without waiting for it.
 ///
-/// A texture whose memory is all mapped is read in place, under a lock
-/// the runtime takes alone while it changes a mapping
-/// (`crate::watch::title_memory_reading`), so that no page goes away under
-/// the read. While the world streams in the runtime remaps all the time,
-/// and each of the frame's 150-360 refreshes waited for it: runs 99-101
-/// have 4, 15 and 16 frame lines with over 300 ms of "textures", up to
-/// 3,708 ms, and on every one of them the wait for this lock is the whole
-/// of it (1,345 of 1,381 ms; 3,630 of 3,708; the write-watch askings 3-12
-/// ms, the texture's own lock 0).
-///
-/// With the switch the refresh asks for the lock without waiting. If the
-/// runtime has it, the texture is read through the kernel instead, which
-/// needs no lock: it fails if a page is not there, and then the texture is
-/// left as it is and read at its next refresh, a frame later. A read
-/// through the kernel costs about 0.6 ms a megabyte against 0.3 in place.
-///
-/// What changes for the picture: a texture that arrives while the runtime
-/// is remapping may show a frame later. It never shows partly read.
+/// This is deliberately always enabled: profiling showed that waiting for
+/// the runtime's remapping lock can consume almost an entire frame. The
+/// nonblocking path reads through the kernel while that lock is held. If a
+/// page is unavailable, it leaves the previous complete texture intact
+/// and retries on the next refresh; it never publishes a partially read
+/// texture. A streamed texture can therefore appear one frame later.
 fn no_wait() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_NO_WAIT").is_some_and(|v| v == "1"))
+    true
 }
 
 /// Since the last frame-rate line, with [`no_wait`]: refreshes that read
