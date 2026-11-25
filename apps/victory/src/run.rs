@@ -200,13 +200,13 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
         let filled = (width as f64 * ratio).floor() as usize;
         let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
         if first_paint {
-            eprint!("\\x1b[2J\\x1b[H");
+            eprint!("\x1b[2J\x1b[H");
             first_paint = false;
         } else {
-            eprint!("\\x1b[H");
+            eprint!("\x1b[H");
         }
         eprint!(
-            "VICTORY PIPELINE PRECOMPILATION\\n[{bar}] {percent:3}%  pipelines {}/{}  pending {}\\nShaders: {} discovered | {} cache hits | {} translated\\nHost PSOs: {} loaded from library | {} newly compiled\\nDiscovery: {}",
+            "VICTORY PIPELINE PRECOMPILATION\n[{bar}] {percent:3}%  pipelines {}/{}  pending {}\nShaders: {} discovered | {} cache hits | {} translated\nHost PSOs: {} loaded from library | {} newly compiled\nDiscovery: {}",
             p.completed,
             p.discovered,
             p.queued,
@@ -224,7 +224,7 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
         let _ = io::stderr().flush();
         std::thread::sleep(Duration::from_millis(200));
     }
-    eprint!("\\x1b[2J\\x1b[H");
+    eprint!("\x1b[2J\x1b[H");
     let _ = io::stderr().flush();
     drop(input);
 }
