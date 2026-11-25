@@ -329,6 +329,20 @@ pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Time inside indexed-texture preparation: [queue/remap, slot lookup and mapping, host mirror and view classification, staging/readable checks, total upload loop].
 pub(crate) static HEAP_TEXTURE_PHASES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+struct HeapPhaseTimer<'a> {
+    counter: &'a AtomicU64,
+    started: std::time::Instant,
+}
+impl<'a> HeapPhaseTimer<'a> {
+    fn new(counter: &'a AtomicU64) -> Self {
+        Self { counter, started: std::time::Instant::now() }
+    }
+}
+impl Drop for HeapPhaseTimer<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_add(self.started.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
+}
 /// Textures brought up to date for shaders that pick them by index
 /// ([`State::heap_textures`]), the bytes of their memory, and the slots
 /// still waiting.
@@ -1535,7 +1549,7 @@ impl State {
         let began = std::time::Instant::now();
         let loop_started = std::time::Instant::now();
         for (index, write) in due {
-            let slot_started = std::time::Instant::now();
+            let slot_phase = HeapPhaseTimer::new(&HEAP_TEXTURE_PHASES[1]);
             if SPENT.load(Ordering::Relaxed) >= PER_FRAME || began.elapsed() > SPAN {
                 break;
             }
@@ -1574,8 +1588,8 @@ impl State {
                     partly = Some(mapped);
                 }
             }
-            HEAP_TEXTURE_PHASES[1].fetch_add(slot_started.elapsed().as_micros() as u64, Ordering::Relaxed);
-            let mirror_started = std::time::Instant::now();
+            drop(slot_phase);
+            let mirror_phase = HeapPhaseTimer::new(&HEAP_TEXTURE_PHASES[2]);
             // A texture object the host renders to or writes holds the
             // host's own contents: nothing to bring up to date, and this
             // pass is no use of it (its host copy is made when something
@@ -1605,8 +1619,8 @@ impl State {
                     continue;
                 }
             };
-            HEAP_TEXTURE_PHASES[2].fetch_add(mirror_started.elapsed().as_micros() as u64, Ordering::Relaxed);
-            let staging_started = std::time::Instant::now();
+            drop(mirror_phase);
+            let staging_phase = HeapPhaseTimer::new(&HEAP_TEXTURE_PHASES[3]);
             let title_fills = crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
             if !title_fills {
                 // a render target, a depth or unordered access texture: the host's own
@@ -1652,7 +1666,7 @@ impl State {
                 host.texture_slot_done(index, write, again);
                 continue;
             }
-            HEAP_TEXTURE_PHASES[3].fetch_add(staging_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            drop(staging_phase);
             // Uploaded: the list holds the staging buffer until it has run;
             // a table read, or the next look at a texture not all mapped
             // yet, makes it anew. (Kept for those until now: every partly
