@@ -504,6 +504,7 @@ fn hand_out(
     #[cfg(windows)]
     let host = Arc::new(make::Pending::new(shaders.clone(), graphics));
     #[cfg(windows)]
+    make::discover(&host);
     make::early(&host);
     #[cfg(windows)]
     let builder = of_builder(&shaders);
@@ -752,6 +753,9 @@ pub(crate) fn startup_wait_before_present() {
         tracing::warn!("startup pipeline barrier disabled with VICTORY_PIPELINE_PRECOMPILE=0");
         return;
     }
+
+    let queued_for_startup = make::precompile_startup_batch();
+    tracing::info!(discovered = make::DISCOVERED.load(Ordering::Acquire), queued_for_startup, "queued startup pipeline precompilation batch");
 
     let mut last_discovered = make::DISCOVERED.load(Ordering::Acquire);
     let mut quiet_since = Instant::now();
