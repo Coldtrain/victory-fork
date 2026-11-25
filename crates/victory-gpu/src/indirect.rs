@@ -95,7 +95,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         uint was;
         budget.InterlockedMax(4, g.x, was);
         budget.InterlockedAdd(8, min(g.x, 1u << 24), was);
-        g = uint3(min(g.x, 65535u), min(g.y, 1u), min(g.z, 1u));
+        // The title's mesh shaders use only the x group ID. The
+        // console dispatch contract is one-dimensional, so normalize y/z
+        // rather than letting zero or garbage values suppress the batch.
+        g = uint3(min(g.x, 65535u), 1u, 1u);
         cost = g.x * g.y * g.z * 128u;
         groups = g;
     }
