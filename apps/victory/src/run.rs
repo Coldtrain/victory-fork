@@ -125,9 +125,9 @@ pub fn run(
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
 
-    // The title must keep running to discover pipeline descriptions. Show
-    // live compilation progress alongside it rather than blocking the title
-    // thread that creates those descriptions.
+    // Run title initialization so it can create the initial pipeline batch.
+    // The first host present is held by the pipeline startup barrier until
+    // that batch has compiled or the user explicitly bypasses the wait.
     let stop_progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let progress_stop = stop_progress.clone();
     let progress = std::thread::Builder::new()
