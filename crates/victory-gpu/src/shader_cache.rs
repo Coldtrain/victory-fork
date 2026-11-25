@@ -79,7 +79,7 @@ fn build() -> &'static [u8; 32] {
         // Produced by victory-shader/build.rs from its source tree, manifest,
         // target, and enabled translator features. This deliberately excludes
         // the embedding executable so HLE/GPU changes do not flush translations.
-        let mut bytes = env!("VICTORY_SHADER_TRANSLATOR_FINGERPRINT")
+        let mut bytes = victory_shader::emit::translator_fingerprint()
             .as_bytes()
             .to_vec();
         let limit = victory_shader::emit::loop_limit();
