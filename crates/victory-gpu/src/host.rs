@@ -1503,8 +1503,8 @@ unsafe impl Send for CardWork {}
 static CARD_WORK: Mutex<Option<CardWork>> = Mutex::new(None);
 
 /// The compare of a declared range of a copy in the card's memory with
-/// its bytes from before, one thread per 64 KiB piece (cut at multiples of
-/// 64 KiB of title memory, as `Shadow::card_piece` cuts them): `differs`
+/// its bytes from before, one thread per 16 KiB piece (cut at multiples of
+/// 16 KiB of title memory, as `Shadow::card_piece` cuts them): `differs`
 /// gets a dword per piece, 1 where a byte differs. The offsets are widened
 /// to 16 bytes; buffers are multiples of 64 KiB, and a piece flagged for a
 /// byte just outside the range costs a fetch that finds nothing.
@@ -1528,9 +1528,9 @@ RWByteAddressBuffer differs : register(u1);
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= pieces) return;
     uint piece = first + id.x;
-    uint lo = piece * 65536u;
+    uint lo = piece * 16384u;
     lo = lo > skew ? lo - skew : 0u;
-    uint hi = min((piece + 1u) * 65536u - skew, size);
+    uint hi = min((piece + 1u) * 16384u - skew, size);
     lo = lo & ~15u;
     hi = (hi + 15u) & ~15u;
     uint4 h = uint4(0x9E3779B9u, 0x85EBCA6Bu, 0xC2B2AE35u, 0x27D4EB2Fu);
