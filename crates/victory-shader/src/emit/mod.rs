@@ -593,6 +593,11 @@ fn emit_program(
             _ => 0,
         };
     }
+    if native.stage == HwStage::Vs
+        && let Some(psv) = c.part(FourCC::PSV0)
+    {
+        vertex_output_interpolation(psv.data, &mut outputs)?;
+    }
     // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
     // wants the position centroid (or per sample), as DXC declares it then.
     if pixel && outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {
@@ -660,6 +665,67 @@ fn emit_program(
         root_indexed_views: res.root_indexed_views.clone(),
     };
     Ok((shader, wave_size))
+}
+
+/// The title's vertex output interpolation lives in PSV0. A float packed
+/// beside an integer can be explicitly constant, as can a float on its own.
+/// OSG1 supplies the physical rows and columns used to match both tables.
+fn vertex_output_interpolation(
+    mut data: &[u8],
+    outputs: &mut [container::SigElement],
+) -> Result<(), ShaderError> {
+    const TRUNCATED: ShaderError =
+        ShaderError::Malformed("truncated vertex pipeline validation data");
+    fn take<'a>(data: &mut &'a [u8], len: usize) -> Result<&'a [u8], ShaderError> {
+        let (head, tail) = data.split_at_checked(len).ok_or(TRUNCATED)?;
+        *data = tail;
+        Ok(head)
+    }
+    fn size(data: &mut &[u8]) -> Result<usize, ShaderError> {
+        Ok(u32::from_le_bytes(take(data, 4)?.try_into().unwrap()) as usize)
+    }
+    let info_size = size(&mut data)?;
+    let info = take(&mut data, info_size)?;
+    // PSVRuntimeInfo0 has no signature. PSVRuntimeInfo1 and later share
+    // these stage and signature count fields.
+    if info.len() < 36 || info[24] != 1 || info[29] == 0 {
+        return Ok(());
+    }
+    let resources = size(&mut data)?;
+    if resources != 0 {
+        let stride = size(&mut data)?;
+        take(&mut data, resources.checked_mul(stride).ok_or(TRUNCATED)?)?;
+    }
+    let strings = size(&mut data)?;
+    take(&mut data, strings)?;
+    let indices = size(&mut data)?;
+    take(&mut data, indices.checked_mul(4).ok_or(TRUNCATED)?)?;
+    let stride = size(&mut data)?;
+    if stride < 16 {
+        return Err(TRUNCATED);
+    }
+    let count = usize::from(info[28]) + usize::from(info[29]);
+    let elements = take(&mut data, count.checked_mul(stride).ok_or(TRUNCATED)?)?;
+    for record in elements.chunks_exact(stride).skip(usize::from(info[28])) {
+        let packed = record[10];
+        if packed & 0x40 == 0 {
+            continue;
+        }
+        if record[13] > 7 {
+            return Err(ShaderError::Malformed("invalid vertex output interpolation"));
+        }
+        let first = u32::from(record[9]);
+        let rows = first..first + u32::from(record[8]);
+        for output in outputs.iter_mut().filter(|e| {
+            e.row.is_some_and(|r| rows.contains(&r))
+                && e.col == ((packed >> 4) & 3)
+                && e.cols == (packed & 15)
+                && e.kind == record[11]
+        }) {
+            output.interp = record[13];
+        }
+    }
+    Ok(())
 }
 
 /// The rows of an `ISG1`/`OSG1` part.
@@ -1739,5 +1805,69 @@ mod barycentric_tests {
         let [e0, e1] = exp_mrt0(4);
         let words = [0xC812_0000, e0, e1, S_ENDPGM];
         assert!(pixel(&words, PERSP_CENTER).is_err());
+    }
+}
+
+#[cfg(test)]
+mod vertex_output_interpolation_tests {
+    use super::{container::SigElement, vertex_output_interpolation};
+    use crate::ShaderError;
+
+    fn element(row: u32, interp: u8) -> SigElement {
+        SigElement {
+            name: "TEXCOORD".into(),
+            index: row,
+            kind: 0,
+            comp: 4,
+            interp,
+            row: Some(row),
+            col: 0,
+            cols: 2,
+            usage: 0,
+            half: false,
+        }
+    }
+
+    fn psv(record: [u8; 16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut info = [0u8; 36];
+        info[24] = 1; // vertex shader
+        info[28] = 0; // input signature count
+        info[29] = 1; // output signature count
+        bytes.extend((info.len() as u32).to_le_bytes());
+        bytes.extend(info);
+        bytes.extend(0u32.to_le_bytes()); // resources
+        bytes.extend(0u32.to_le_bytes()); // strings
+        bytes.extend(0u32.to_le_bytes()); // indices
+        bytes.extend(16u32.to_le_bytes()); // signature element stride
+        bytes.extend(record);
+        bytes
+    }
+
+    #[test]
+    fn vertex_output_interpolation_matches_the_physical_signature_row() {
+        let mut outputs = [element(3, 1), element(4, 1)];
+        let mut record = [0u8; 16];
+        record[8] = 1;  // row count
+        record[9] = 3;  // first row
+        record[10] = 0x42; // interpolation present, column 0, two columns
+        record[11] = 0;  // float
+        record[13] = 4;  // declared interpolation mode
+        vertex_output_interpolation(&psv(record), &mut outputs).unwrap();
+        assert_eq!(outputs[0].interp, 4);
+        assert_eq!(outputs[1].interp, 1);
+    }
+
+    #[test]
+    fn malformed_vertex_output_interpolation_is_rejected() {
+        let mut record = [0u8; 16];
+        record[8] = 1;
+        record[10] = 0x42;
+        record[11] = 0;
+        record[13] = 8;
+        assert_eq!(
+            vertex_output_interpolation(&psv(record), &mut [element(3, 1)]),
+            Err(ShaderError::Malformed("invalid vertex output interpolation"))
+        );
     }
 }
