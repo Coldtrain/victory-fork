@@ -1589,14 +1589,30 @@ mod state {
         super::count_dispatch();
         with_state(this, |list, s| s.dispatch(list, x, y, z));
     }
+    /// The title's mesh programs consume the x group ID only. An empty
+    /// dimension therefore means no work; y/z are accepted for ABI
+    /// compatibility but do not multiply the title's meshlet range.
+    pub(super) fn mesh_groups(x: u32, y: u32, z: u32) -> Option<u32> {
+        if x == 0 || y == 0 || z == 0 {
+            return None;
+        }
+        if y != 1 || z != 1 {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| tracing::warn!(x, y, z, "mesh dispatch has non-unit y/z; title mesh shaders use x only"));
+        }
+        Some(x)
+    }
     /// `DispatchMesh(x, y, z)` (the PC method of List6).
     pub(super) extern "system" fn dispatch_mesh(this: This, x: u32, y: u32, z: u32) {
         super::count_draw();
-        with_state(this, |list, s| s.dispatch_mesh(list, x, y, z));
+        if let Some(x) = mesh_groups(x, y, z) {
+            with_state(this, |list, s| s.dispatch_mesh(list, x, 1, 1));
+        }
     }
-    /// `DispatchMeshX(x, flags, indirect arguments, payload)`.
-    /// shortcut: dispatches whose group count is in GPU memory (indirect)
-    /// are dropped; make them ExecuteIndirect when the title uses them.
+    /// `DispatchMeshX(x, flags, indirect arguments, payload)`. With an
+    /// indirect address, the three group counts live in the argument buffer.
+    /// Their layout is inferred as D3D12_DISPATCH_MESH_ARGUMENTS (12 bytes);
+    /// flags and payload are currently not interpreted.
     pub(super) extern "system" fn dispatch_mesh_x(
         this: This,
         x: u32,
@@ -1604,13 +1620,22 @@ mod state {
         indirect: u64,
         _payload: u64,
     ) {
+        const MESH: u32 = 10;
+        const STRIDE: u32 = 12;
         super::count_draw();
-        if indirect != 0 {
-            static ONCE: std::sync::Once = std::sync::Once::new();
-            ONCE.call_once(|| tracing::warn!("indirect mesh dispatches dropped"));
+        if indirect == 0 {
+            if x != 0 {
+                with_state(this, |list, s| s.dispatch_mesh(list, x, 1, 1));
+            }
             return;
         }
-        with_state(this, |list, s| s.dispatch_mesh(list, x));
+        let mut ran = false;
+        with_state(this, |list, s| {
+            ran = s.execute_indirect(list, (MESH, STRIDE, 1), indirect, None);
+        });
+        if !ran {
+            super::INDIRECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     pub(super) extern "system" fn draw_indexed(
         this: This,
