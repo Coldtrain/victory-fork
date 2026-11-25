@@ -289,7 +289,8 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
 /// and retries on the next refresh; it never publishes a partially read
 /// texture. A streamed texture can therefore appear one frame later.
 fn no_wait() -> bool {
-    true
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_NO_WAIT").is_some_and(|v| v == "1"))
 }
 
 /// Since the last frame-rate line, with [`no_wait`]: refreshes that read
