@@ -329,6 +329,12 @@ pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Time inside indexed-texture preparation: [queue/remap, slot lookup and mapping, host mirror and view classification, staging/readable checks, total upload loop].
 pub(crate) static HEAP_TEXTURE_PHASES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+/// Fine-grained texture-pass timings: descriptor decode, mapped-page query,
+/// host descriptor mirror, staging metadata, and descriptor readability check.
+pub(crate) static HEAP_TEXTURE_DETAIL: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+/// Counts since the last detailed report: due, examined, placed, unmapped,
+/// partial, mirrored, and uploaded texture slots.
+pub(crate) static HEAP_TEXTURE_COUNTS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 struct HeapPhaseTimer<'a> {
     counter: &'a AtomicU64,
     started: std::time::Instant,
@@ -1546,6 +1552,7 @@ impl State {
         host.texture_slots_remapped(frame);
         let queue_started = std::time::Instant::now();
         let (due, census) = host.texture_slots_due(frame, 4096);
+        HEAP_TEXTURE_COUNTS[0].fetch_add(due.len() as u64, Ordering::Relaxed);
         HEAP_TEXTURES_WAITING.store(census[0], Ordering::Relaxed);
         for (count, now) in HEAP_TEXTURES_QUEUE.iter().zip(census) {
             count.store(now, Ordering::Relaxed);
@@ -1598,13 +1605,20 @@ impl State {
             let mut partly = None;
             // Resolve the title descriptor once. The previous path decoded
             // the same slot again below before mirroring it.
+            HEAP_TEXTURE_COUNTS[1].fetch_add(1, Ordering::Relaxed);
+            let decode_started = std::time::Instant::now();
             let handle = heap.handle(index);
             let title_view = handle.and_then(crate::descriptor::view);
+            HEAP_TEXTURE_DETAIL[0].fetch_add(decode_started.elapsed().as_micros() as u64, Ordering::Relaxed);
             if let Some(View::Placed(false, resource_desc, desc)) = title_view.as_ref() {
+                HEAP_TEXTURE_COUNTS[2].fetch_add(1, Ordering::Relaxed);
                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
                 let len = crate::resource::placed_bytes(resource_desc).unwrap_or(1);
+                let mapped_started = std::time::Instant::now();
                 let mapped = crate::texture::mapped_bytes(address as *const u8, len as usize);
+                HEAP_TEXTURE_DETAIL[1].fetch_add(mapped_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                 if mapped == 0 {
+                    HEAP_TEXTURE_COUNTS[3].fetch_add(1, Ordering::Relaxed);
                     HEAP_TEXTURES_AWAY.fetch_add(1, Ordering::Relaxed);
                     // Streamed out: what the slot showed is let go.
                     host.texture_slot_gone(index);
@@ -1612,6 +1626,7 @@ impl State {
                     continue;
                 }
                 if mapped < len {
+                    HEAP_TEXTURE_COUNTS[4].fetch_add(1, Ordering::Relaxed);
                     if mapped <= host.texture_slot_mapped(index) {
                         HEAP_TEXTURES_PARTLY[0].fetch_add(1, Ordering::Relaxed);
                         host.texture_slot_later(index, write, frame, most);
@@ -1645,7 +1660,12 @@ impl State {
                 }
                 continue;
             }
+            let mirror_started = std::time::Instant::now();
             let view = handle.and_then(|handle| host.mirror(index, handle, true));
+            HEAP_TEXTURE_DETAIL[2].fetch_add(mirror_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            if view.is_some() {
+                HEAP_TEXTURE_COUNTS[5].fetch_add(1, Ordering::Relaxed);
+            }
             let placed = view.as_ref().and_then(crate::descriptor::host::placed_texture);
             let resource = match placed.as_ref().or(view.as_ref()) {
                 Some(&View::Shader(resource, _)) => resource as This,
@@ -1656,8 +1676,10 @@ impl State {
             };
             drop(mirror_phase);
             let staging_phase = HeapPhaseTimer::new(&HEAP_TEXTURE_PHASES[3]);
+            let metadata_started = std::time::Instant::now();
             let title_fills = crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
             if !title_fills {
+                HEAP_TEXTURE_DETAIL[3].fetch_add(metadata_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                 // a render target, a depth or unordered access texture: the host's own
                 host.texture_slot_done(index, write, None);
                 continue;
@@ -1666,8 +1688,14 @@ impl State {
             // through a table: they upload it, and check it at every
             // submission that samples it.
             let tabled = crate::texture::is_staged(resource);
+            HEAP_TEXTURE_DETAIL[3].fetch_add(metadata_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            if tabled {
+                HEAP_TEXTURE_COUNTS[6].fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(view) = &view {
+                let readable_started = std::time::Instant::now();
                 readable(list, sampled.kind, view);
+                HEAP_TEXTURE_DETAIL[4].fetch_add(readable_started.elapsed().as_micros() as u64, Ordering::Relaxed);
             }
             // A texture view the host refuses removes the device: name it.
             static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1711,6 +1739,7 @@ impl State {
             SPENT.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURE_BYTES.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
+            HEAP_TEXTURE_COUNTS[6].fetch_add(1, Ordering::Relaxed);
             host.texture_slot_done(index, write, again);
         }
         HEAP_TEXTURE_PHASES[4].fetch_add(loop_started.elapsed().as_micros() as u64, Ordering::Relaxed);
