@@ -5739,11 +5739,13 @@ impl Meter {
         let card = crate::shadow::card_stats();
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();
-        // Over the same frames as the counts above.
-        #[cfg(feature = "diagnostics")]
-        let drops = crate::pipeline::take_drops();
         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
             self.logged = std::time::Instant::now();
+            // Drain only when printing the detailed report. Taking this on
+            // every frame silently discarded all but the final frame's
+            // pipeline-drop reasons in each five-second reporting window.
+            #[cfg(feature = "diagnostics")]
+            let drops = crate::pipeline::take_drops();
             tracing::info!(
                 "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
                 crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
@@ -5829,8 +5831,7 @@ impl Meter {
                 crate::copystat::log(std::mem::take(&mut self.copy_stats_frames) as f64);
                 for (why, n) in drops.iter().take(40) {
                     tracing::info!(
-                        "dropped {:.1}/frame without a host pipeline: {why}",
-                        *n as f64 / frames
+                        "dropped {n} times without a host pipeline since the last detailed report: {why}"
                     );
                 }
             }
