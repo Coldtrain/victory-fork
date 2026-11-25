@@ -1425,6 +1425,7 @@ impl State {
         // it is named below.
         static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let mut alive = !GONE.load(Ordering::Relaxed) && crate::descriptor::host::device_removed().is_none();
+        let setup_us = started.elapsed().as_micros() as u64;
         let scan_started = std::time::Instant::now();
         for (n, &index) in slots.iter().enumerate() {
             ranges.remove(&index);
@@ -1460,7 +1461,6 @@ impl State {
             }
             ranges.insert(index, (shadow, address, address + len));
         }
-        let setup_us = scan_started.elapsed().as_micros() as u64;
         let scan_us = scan_started.elapsed().as_micros() as u64;
         let views = ranges.len() as u32;
         // Per host copy, the span its picked views cover.
