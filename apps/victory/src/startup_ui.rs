@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{
-        BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, PAINTSTRUCT,
+        BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HDC, PAINTSTRUCT,
         SelectObject, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::WindowsAndMessaging::{
-        CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
+        CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
         DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics, IDC_ARROW,
         InvalidateRect, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
         TranslateMessage, UpdateWindow, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
@@ -28,7 +28,6 @@ use windows_sys::Win32::{
 const WIDTH: i32 = 960;
 const HEIGHT: i32 = 540;
 const TIMER_ID: usize = 1;
-const WM_APP_REFRESH: u32 = 0x8001;
 
 static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static LAST_DISCOVERED: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -39,7 +38,7 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn brush(hdc: isize, rect: RECT, color: u32) {
+fn brush(hdc: HDC, rect: RECT, color: u32) {
     unsafe {
         let b = CreateSolidBrush(color);
         FillRect(hdc, &rect, b);
@@ -47,7 +46,7 @@ fn brush(hdc: isize, rect: RECT, color: u32) {
     }
 }
 
-fn label(hdc: isize, x: i32, y: i32, value: &str, color: u32, size: i32, bold: bool) {
+fn label(hdc: HDC, x: i32, y: i32, value: &str, color: u32, size: i32, bold: bool) {
     let text = wide(value);
     unsafe {
         let font = windows_sys::Win32::Graphics::Gdi::CreateFontW(
