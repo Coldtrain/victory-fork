@@ -1854,22 +1854,23 @@ impl State {
         }
     }
 
-    /// Runs a mesh dispatch with the title's full three-dimensional group
-    /// count. D3D12 applies the mesh shader's group ID in all dimensions.
-    pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
+    /// Runs the title's one-dimensional meshlet dispatch. The console
+    /// shaders consume the x group ID; y/z are kept at one to avoid
+    /// submitting duplicate meshlet ranges.
+    pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32, _y: u32, _z: u32) {
         self.window = None;
         #[cfg(feature = "diagnostics")]
-        self.trace("mesh", x, y);
+        self.trace("mesh", x, 1);
         let ran = mesh_test() != 1
             && mesh_kept(self.pipeline)
             && self.prepare_for(list, false, true)
             && match list.list.cast::<ID3D12GraphicsCommandList6>() {
                 Ok(l6) => {
                     #[cfg(feature = "diagnostics")]
-                    list.note_op(|| self.op_text(format!("mesh {x}x{y}x{z}"), false));
+                    list.note_op(|| self.op_text(format!("mesh {x}x1x1"), false));
                     self.mesh_scissor(list, true);
                     // SAFETY: an open list with everything set.
-                    unsafe { l6.DispatchMesh(x, y, z) };
+                    unsafe { l6.DispatchMesh(x, 1, 1) };
                     self.mesh_scissor(list, false);
                     DRAWN.fetch_add(1, Ordering::Relaxed);
                     true
