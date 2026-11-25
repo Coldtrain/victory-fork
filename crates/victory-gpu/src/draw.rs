@@ -817,10 +817,26 @@ impl State {
             }
             count = slot + 1;
             if v.address == 0 || v.size == 0 {
-                continue;
+                tracing::warn!(
+                    slot,
+                    address = format_args!("{:#x}", v.address),
+                    size = v.size,
+                    stride = v.stride,
+                    pipeline = format_args!("{:#x}", self.pipeline),
+                    "draw requires a vertex buffer that is not bound"
+                );
+                return false;
             }
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
-                continue;
+                tracing::warn!(
+                    slot,
+                    address = format_args!("{:#x}", v.address),
+                    size = v.size,
+                    stride = v.stride,
+                    pipeline = format_args!("{:#x}", self.pipeline),
+                    "draw vertex buffer has no host memory copy"
+                );
+                return false;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
             *view = D3D12_VERTEX_BUFFER_VIEW {
@@ -838,6 +854,13 @@ impl State {
         if indexed {
             let v = self.index;
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
+                tracing::warn!(
+                    address = format_args!("{:#x}", v.address),
+                    size = v.size,
+                    format = v.format,
+                    pipeline = format_args!("{:#x}", self.pipeline),
+                    "indexed draw has no host copy of its index buffer"
+                );
                 return false;
             };
             shadow.refresh(list, v.address, u64::from(v.size));
