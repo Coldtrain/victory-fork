@@ -4333,6 +4333,14 @@ impl<'a> Lower<'a> {
                 let value = self.s.m.load(c, ptr);
                 self.group_sync(c);
                 value
+            } else if exchange.is_some() {
+                // A group of at most 32 threads occupies only the lower half
+                // of the console wave; reads into the absent upper half are zero.
+                let value = self.read_lane(x, src);
+                let thirty_two = self.s.m.i32(32);
+                let present = self.s.m.cmp(c, pred::IULT, src, thirty_two);
+                let zero = self.s.m.i32(0);
+                self.s.m.select(c, present, value, zero)
             } else {
                 self.read_lane(x, src)
             };
