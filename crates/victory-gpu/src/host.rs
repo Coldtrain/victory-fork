@@ -695,7 +695,7 @@ mod tests {
             (20, 1 << 16, 2 << 16, 4 << 16),
         ];
         assert_eq!(
-            super::relay_fetch_runs(&pieces),
+            super::Host::relay_fetch_runs(&pieces),
             [(0, 2 << 16), (2, 1 << 16), (3, 2 << 16)]
         );
     }
@@ -3393,7 +3393,7 @@ impl Host {
                     .iter()
                     .map(|(copy, _, lo, hi, at)| (*copy, *lo, *hi, *at))
                     .collect();
-                for (first, bytes) in relay_fetch_runs(&fetch_keys) {
+                for (first, bytes) in Self::relay_fetch_runs(&fetch_keys) {
                     let (_, shadow, lo, _, at) = &pieces[first];
                     list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, bytes);
                 }
