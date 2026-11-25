@@ -1589,29 +1589,10 @@ mod state {
         super::count_dispatch();
         with_state(this, |list, s| s.dispatch(list, x, y, z));
     }
-    /// The title's mesh programs consume the x group ID only. An empty
-    /// dimension therefore means no work; y/z are accepted for ABI
-    /// compatibility but do not multiply the title's meshlet range.
-    pub(super) fn mesh_groups(x: u32, y: u32, z: u32) -> Option<u32> {
-        if x == 0 || y == 0 || z == 0 {
-            return None;
-        }
-        if x > 65_535 {
-            static TOO_MANY: std::sync::Once = std::sync::Once::new();
-            TOO_MANY.call_once(|| tracing::warn!(x, "mesh dispatch x count clamped to the D3D12 limit"));
-        }
-        if y != 1 || z != 1 {
-            static ONCE: std::sync::Once = std::sync::Once::new();
-            ONCE.call_once(|| tracing::warn!(x, y, z, "mesh dispatch has non-unit y/z; title mesh shaders use x only"));
-        }
-        Some(x.min(65_535))
-    }
     /// `DispatchMesh(x, y, z)` (the PC method of List6).
     pub(super) extern "system" fn dispatch_mesh(this: This, x: u32, y: u32, z: u32) {
         super::count_draw();
-        if let Some(x) = mesh_groups(x, y, z) {
-            with_state(this, |list, s| s.dispatch_mesh(list, x, 1, 1));
-        }
+        with_state(this, |list, s| s.dispatch_mesh(list, x, y, z));
     }
     /// `DispatchMeshX(x, flags, indirect arguments, payload)`. With an
     /// indirect address, the three group counts live in the argument buffer.
@@ -2198,21 +2179,6 @@ static NEWER_LIST_FUNCTIONS: Table<160> = Table(list_table(true));
 mod tests {
     use super::*;
     use crate::object::slot;
-
-    /// Mesh programs consume the x group ID only. Empty dimensions must
-    /// not submit work, and non-unit y/z must not duplicate meshlets.
-    #[cfg(windows)]
-    #[test]
-    fn mesh_dispatch_groups_are_one_dimensional_and_empty_safe() {
-        use state::mesh_groups;
-        assert_eq!(mesh_groups(5, 1, 1), Some(5));
-        assert_eq!(mesh_groups(0, 1, 1), None);
-        assert_eq!(mesh_groups(5, 0, 1), None);
-        assert_eq!(mesh_groups(5, 1, 0), None);
-        assert_eq!(mesh_groups(5, 2, 3), Some(5));
-        assert_eq!(mesh_groups(5, u32::MAX, u32::MAX), Some(5));
-        assert_eq!(mesh_groups(65_536, 1, 1), Some(65_535));
-    }
 
     /// An indirect mesh dispatch that cannot be executed is accounted for
     /// as dropped indirect work rather than silently disappearing.
