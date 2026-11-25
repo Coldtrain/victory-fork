@@ -2211,6 +2211,7 @@ mod tests {
         assert_eq!(mesh_groups(5, 1, 0), None);
         assert_eq!(mesh_groups(5, 2, 3), Some(5));
         assert_eq!(mesh_groups(5, u32::MAX, u32::MAX), Some(5));
+        assert_eq!(mesh_groups(65_536, 1, 1), Some(65_535));
     }
 
     /// An indirect mesh dispatch that cannot be executed is accounted for
