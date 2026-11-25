@@ -18,7 +18,7 @@ pub mod runtime;
 
 pub use host::HostPolicy;
 pub use registry::{HleExport, HleModule, registry};
-pub use victory_gpu::console;
+pub use victory_gpu::console;\n\n/// Current shader translation and host pipeline preparation progress.\n#[cfg(windows)]\npub fn startup_progress() -> victory_gpu::pipeline::StartupProgress {\n    victory_gpu::pipeline::startup_progress()\n}
 
 use victory_loader::{ImportResolver, Provenance, Resolution};
 use victory_pe::ImportSymbol;
