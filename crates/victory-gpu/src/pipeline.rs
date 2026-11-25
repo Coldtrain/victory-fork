@@ -549,7 +549,8 @@ pub(crate) extern "system" fn create_graphics(
         // Keep the remaining state too; without it ordinary (non-stream)
         // graphics pipelines cannot produce a host PSO.
         let full = unsafe {
-            &*desc.cast::<windows::Win32::Graphics::Direct3D12::D3D12_GRAPHICS_PIPELINE_STATE_DESC>()
+            &*(desc as *const GraphicsHead)
+                .cast::<windows::Win32::Graphics::Direct3D12::D3D12_GRAPHICS_PIPELINE_STATE_DESC>()
         };
         Some(Box::new(host::GraphicsState::from_desc(full)))
     };
