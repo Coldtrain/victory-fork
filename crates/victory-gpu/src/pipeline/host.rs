@@ -150,6 +150,15 @@ fn host_blend(
 }
 
 impl GraphicsState {
+    /// Prioritize depth-only pipelines during background warming. These are
+    /// commonly shadow-map and depth-prepass PSOs needed by many later draws.
+    pub(super) fn writes_depth_only(&self) -> bool {
+        self.targets.NumRenderTargets == 0
+            && self.depth_format != DXGI_FORMAT_UNKNOWN
+            && self.depth.DepthEnable.as_bool()
+            && self.depth.DepthWriteMask == D3D12_DEPTH_WRITE_MASK_ALL
+    }
+
     /// Copies the graphics state of the plain D3D12 graphics description.
     ///
     /// Unlike a stream, this description owns no state after the creation
