@@ -4012,13 +4012,27 @@ impl<'a> Lower<'a> {
             mesh_output_bytes(outputs, prims, m.max_vertices, m.max_primitives) <= MESH_OUTPUT_LIMIT
         };
         if !fits(mesh) {
+            let requested = mesh;
             mesh.max_vertices = mesh.max_vertices.min(threads);
             mesh.max_primitives = mesh.max_primitives.min(threads);
+            let bytes = mesh_output_bytes(outputs, prims, mesh.max_vertices, mesh.max_primitives);
+            let still_over = !fits(mesh);
+            tracing::warn!(
+                threads,
+                requested_vertices = requested.max_vertices,
+                requested_primitives = requested.max_primitives,
+                host_vertices = mesh.max_vertices,
+                host_primitives = mesh.max_primitives,
+                output_bytes = bytes,
+                output_limit = MESH_OUTPUT_LIMIT,
+                still_over,
+                "mesh shader output maxima reduced for the host pipeline"
+            );
             // shortcut: outputs past the cap even at the lane count are
             // still emitted with the lower maxima (drivers take them);
             // refuse them here if one hangs.
             // Experiment (`VICTORY_MESH_OUTPUT_STRICT=1`): they are refused.
-            if !fits(mesh) && std::env::var_os("VICTORY_MESH_OUTPUT_STRICT").is_some() {
+            if still_over && std::env::var_os("VICTORY_MESH_OUTPUT_STRICT").is_some() {
                 return Err("a mesh shader whose outputs pass the host's 32 KiB");
             }
             self.s.mesh = Some(mesh);
