@@ -4302,7 +4302,8 @@ impl<'a> Lower<'a> {
                 }
                 None => x,
             };
-            let r = if let Some((slot, false, _)) = self.exchange {
+            let exchange = self.exchange.as_ref().map(|(slot, small, _)| (*slot, *small));
+            let r = if let Some((slot, false)) = exchange {
                 // A wave64 bpermute may name a lane in the other host wave32.
                 // Stage each console lane's source value in group-shared memory,
                 // then read the requested lane after a full-group rendezvous.
@@ -4314,15 +4315,20 @@ impl<'a> Lower<'a> {
                 let waves = group.div_ceil(64);
                 let scratch = slot + 2 * waves;
                 let thread = self.console_thread();
-                let wave = self.s.m.bin(c, Bin::LShr, thread, self.s.m.i32(6));
-                let wave_base = self.s.m.bin(c, Bin::Mul, wave, self.s.m.i32(64));
+                let six = self.s.m.i32(6);
+                let wave = self.s.m.bin(c, Bin::LShr, thread, six);
+                let sixty_four = self.s.m.i32(64);
+                let wave_base = self.s.m.bin(c, Bin::Mul, wave, sixty_four);
                 let lane = self.console_lane();
-                let index = self.s.m.bin(c, Bin::Add, self.s.m.i32(scratch), self.s.m.bin(c, Bin::Add, wave_base, lane));
+                let lane_offset = self.s.m.bin(c, Bin::Add, wave_base, lane);
+                let scratch_base = self.s.m.i32(scratch);
+                let index = self.s.m.bin(c, Bin::Add, scratch_base, lane_offset);
                 let lds = self.s.lds();
                 let ptr = self.s.m.element(c, lds, index);
                 self.s.m.store(c, ptr, x);
                 self.group_sync(c);
-                let target = self.s.m.bin(c, Bin::Add, self.s.m.i32(scratch), self.s.m.bin(c, Bin::Add, wave_base, src));
+                let target_offset = self.s.m.bin(c, Bin::Add, wave_base, src);
+                let target = self.s.m.bin(c, Bin::Add, scratch_base, target_offset);
                 let ptr = self.s.m.element(c, lds, target);
                 let value = self.s.m.load(c, ptr);
                 self.group_sync(c);
