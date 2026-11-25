@@ -188,7 +188,7 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
         let settled = p.discovery_complete
             && p.completed >= p.discovered
             && p.queued == 0
-            && last_change.elapsed() >= Duration::from_secs(1);
+            && last_change.elapsed() >= Duration::from_secs(5);
 
         let ratio = if p.discovered == 0 {
             0.0
