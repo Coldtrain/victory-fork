@@ -327,6 +327,8 @@ pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 /// Time in microseconds spent in each part of the indexed-buffer heap pass:
 /// [slot mirroring, span aggregation, buffer refresh, indexed texture uploads].
 pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Time inside indexed-texture preparation: [queue/remap, slot lookup and mapping, host mirror and view classification, staging/readable checks, total upload loop].
+pub(crate) static HEAP_TEXTURE_PHASES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 /// Textures brought up to date for shaders that pick them by index
 /// ([`State::heap_textures`]), the bytes of their memory, and the slots
 /// still waiting.
@@ -1497,11 +1499,13 @@ impl State {
         // Slots whose texture's memory the runtime mapped, unmapped or
         // wrote since the last pass are due again.
         host.texture_slots_remapped(frame);
+        let queue_started = std::time::Instant::now();
         let (due, census) = host.texture_slots_due(frame, 4096);
         HEAP_TEXTURES_WAITING.store(census[0], Ordering::Relaxed);
         for (count, now) in HEAP_TEXTURES_QUEUE.iter().zip(census) {
             count.store(now, Ordering::Relaxed);
         }
+        HEAP_TEXTURE_PHASES[0].fetch_add(queue_started.elapsed().as_micros() as u64, Ordering::Relaxed);
         // The frames in about four seconds, between 16 and 256: how long a
         // slot with nothing to upload waits at most for its next look. In
         // frames alone it was 120: four minutes at the opening cutscene's
@@ -1529,7 +1533,9 @@ impl State {
         // The rest waits for the next frames, as it does past the bytes.
         const SPAN: std::time::Duration = std::time::Duration::from_millis(250);
         let began = std::time::Instant::now();
+        let loop_started = std::time::Instant::now();
         for (index, write) in due {
+            let slot_started = std::time::Instant::now();
             if SPENT.load(Ordering::Relaxed) >= PER_FRAME || began.elapsed() > SPAN {
                 break;
             }
@@ -1568,6 +1574,8 @@ impl State {
                     partly = Some(mapped);
                 }
             }
+            HEAP_TEXTURE_PHASES[1].fetch_add(slot_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            let mirror_started = std::time::Instant::now();
             // A texture object the host renders to or writes holds the
             // host's own contents: nothing to bring up to date, and this
             // pass is no use of it (its host copy is made when something
@@ -1597,6 +1605,8 @@ impl State {
                     continue;
                 }
             };
+            HEAP_TEXTURE_PHASES[2].fetch_add(mirror_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+            let staging_started = std::time::Instant::now();
             let title_fills = crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
             if !title_fills {
                 // a render target, a depth or unordered access texture: the host's own
@@ -1642,6 +1652,7 @@ impl State {
                 host.texture_slot_done(index, write, again);
                 continue;
             }
+            HEAP_TEXTURE_PHASES[3].fetch_add(staging_started.elapsed().as_micros() as u64, Ordering::Relaxed);
             // Uploaded: the list holds the staging buffer until it has run;
             // a table read, or the next look at a texture not all mapped
             // yet, makes it anew. (Kept for those until now: every partly
@@ -1653,6 +1664,7 @@ impl State {
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
             host.texture_slot_done(index, write, again);
         }
+        HEAP_TEXTURE_PHASES[4].fetch_add(loop_started.elapsed().as_micros() as u64, Ordering::Relaxed);
     }
 
     /// For the frame listing, after a dropped dispatch's line: its group
