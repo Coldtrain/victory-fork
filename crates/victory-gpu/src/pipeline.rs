@@ -779,7 +779,7 @@ pub(crate) fn startup_wait_before_present() {
 /// Native handle of the main game window, available after its first present.
 #[cfg(windows)]
 pub fn startup_parent_window() -> Option<usize> {
-    host::window_handle()
+    crate::host::window_handle()
 }
 
 /// Current shader and pipeline preparation counters for the loading UI.
