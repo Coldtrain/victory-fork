@@ -541,10 +541,21 @@ pub(crate) extern "system" fn create_graphics(
     };
     let stages = GRAPHICS_STAGES.iter().zip(&desc.stages);
     let shaders = stages.filter_map(|(s, c)| copy(s, c)).collect();
+    #[cfg(windows)]
+    let graphics = {
+        // GraphicsHead is the leading portion of the native D3D12
+        // graphics description: root signature followed by VS/PS/DS/HS/GS.
+        // Keep the remaining state too; without it ordinary (non-stream)
+        // graphics pipelines cannot produce a host PSO.
+        let full = unsafe {
+            &*desc.cast::<windows::Win32::Graphics::Direct3D12::D3D12_GRAPHICS_PIPELINE_STATE_DESC>()
+        };
+        Some(Box::new(host::GraphicsState::from_desc(full)))
+    };
     hand_out(
         shaders,
         #[cfg(windows)]
-        None,
+        graphics,
         iid,
         out,
     )
