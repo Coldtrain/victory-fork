@@ -9,10 +9,9 @@
 //! containers are shared by content hash and translated once, on first
 //! use (decision 0003).
 //!
-//! Host pipelines are made for vertex/pixel graphics, mesh/pixel graphics,
-//! and compute. Amplification, tessellation and geometry stages are retained
-//! but are not yet supported by the host pipeline builder. Both stream and
-//! plain graphics descriptions preserve their graphics state. The 32-byte
+//! shortcut: only vertex plus pixel pipelines from streams and compute
+//! pipelines get host pipelines; mesh, tessellation and geometry stages,
+//! and the plain graphics description, keep their containers only. The 32-byte
 //! packet after the header stays zero: titles only copy it inline, which
 //! our null command-list limits keep from running.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -453,17 +452,16 @@ pub(crate) fn is_skipped(this: This) -> bool {
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn note_drop(this: This) {
     let why = if this.is_null() {
-        "no pipeline set".to_owned()
+        Some("no pipeline set".to_owned())
     } else {
         let p = pipeline(this);
         skipped_shader(p)
             .map(|hash| format!("skipped shader {hash}"))
             .or_else(|| make::missing(&p.host))
-            .unwrap_or_else(|| {
-                "host pipeline unavailable without a recorded pending or failure state".to_owned()
-            })
     };
-    note_why(why);
+    if let Some(why) = why {
+        note_why(why);
+    }
 }
 
 /// Counts a draw or dispatch dropped for `why` (diagnostics).
@@ -542,22 +540,10 @@ pub(crate) extern "system" fn create_graphics(
     };
     let stages = GRAPHICS_STAGES.iter().zip(&desc.stages);
     let shaders = stages.filter_map(|(s, c)| copy(s, c)).collect();
-    #[cfg(windows)]
-    let graphics = {
-        // GraphicsHead is the leading portion of the native D3D12
-        // graphics description: root signature followed by VS/PS/DS/HS/GS.
-        // Keep the remaining state too; without it ordinary (non-stream)
-        // graphics pipelines cannot produce a host PSO.
-        let full = unsafe {
-            &*(desc as *const GraphicsHead)
-                .cast::<windows::Win32::Graphics::Direct3D12::D3D12_GRAPHICS_PIPELINE_STATE_DESC>()
-        };
-        Some(Box::new(host::GraphicsState::from_desc(full)))
-    };
     hand_out(
         shaders,
         #[cfg(windows)]
-        graphics,
+        None,
         iid,
         out,
     )
@@ -721,102 +707,6 @@ pub(crate) fn trim_library() {
 #[cfg(windows)]
 pub(crate) fn library_removal_note() -> String {
     library::removal_note()
-}
-
-/// Live startup/cache statistics for the loading UI. `discovered` is the
-/// number of title pipeline descriptions seen this run; `completed` includes
-/// both successful and refused host pipeline creations.
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct StartupProgress {
-    pub discovered: u64,
-    pub completed: u64,
-    pub failed: u64,
-    pub queued: u64,
-    pub library_loaded: u64,
-    pub library_compiled: u64,
-    pub shaders_discovered: u64,
-    pub shaders_cached: u64,
-    pub shaders_translated: u64,
-    pub discovery_complete: bool,
-}
-
-/// The first host present is held until every pipeline description the
-/// title created before that point has finished its background compilation.
-#[cfg(windows)]
-static STARTUP_GATE_ENTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(windows)]
-static STARTUP_PRESENTED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(windows)]
-static STARTUP_BYPASS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Called by the loading UI when the user presses Enter.
-#[cfg(windows)]
-pub fn bypass_startup_wait() {
-    STARTUP_BYPASS.store(true, std::sync::atomic::Ordering::Release);
-}
-
-/// Called synchronously before the first frame can be presented. The title
-/// has already created the pipelines needed to record that frame; hold the
-/// frame while their workers finish. This is deliberately a first-frame
-/// barrier, not a claim that future levels' unseen PSO variants are known.
-#[cfg(windows)]
-pub(crate) fn startup_wait_before_present() {
-    use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
-
-    if STARTUP_GATE_ENTERED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    STARTUP_PRESENTED.store(true, Ordering::Release);
-
-    if std::env::var_os("VICTORY_PIPELINE_PRECOMPILE").is_some_and(|v| v == "0") {
-        tracing::warn!("startup pipeline barrier disabled with VICTORY_PIPELINE_PRECOMPILE=0");
-        return;
-    }
-
-    let mut last_discovered = make::DISCOVERED.load(Ordering::Acquire);
-    let mut quiet_since = Instant::now();
-    loop {
-        if STARTUP_BYPASS.load(Ordering::Acquire) {
-            tracing::warn!("startup pipeline compilation wait bypassed by user");
-            return;
-        }
-        let discovered = make::DISCOVERED.load(Ordering::Acquire);
-        if discovered != last_discovered {
-            last_discovered = discovered;
-            quiet_since = Instant::now();
-        }
-        let completed = make::COMPLETED.load(Ordering::Acquire);
-        let failed = make::FAILED.load(Ordering::Acquire);
-        let queued = make::waiting();
-        if completed >= discovered && failed == 0 && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
-            tracing::info!(discovered, completed, "initial pipeline batch compiled before first present");
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// Current shader and pipeline preparation counters.
-#[cfg(windows)]
-pub fn startup_progress() -> StartupProgress {
-    let (shaders_cached, shaders_translated) = crate::shader_cache::counts();
-    StartupProgress {
-        discovered: make::DISCOVERED.load(std::sync::atomic::Ordering::Relaxed),
-        completed: make::COMPLETED.load(std::sync::atomic::Ordering::Relaxed),
-        failed: make::FAILED.load(std::sync::atomic::Ordering::Relaxed),
-        queued: make::waiting(),
-        library_loaded: library::LOADED.load(std::sync::atomic::Ordering::Relaxed),
-        library_compiled: library::MADE.load(std::sync::atomic::Ordering::Relaxed),
-        shaders_discovered: KEPT[0].load(std::sync::atomic::Ordering::Relaxed),
-        shaders_cached,
-        shaders_translated,
-        discovery_complete: STARTUP_PRESENTED.load(std::sync::atomic::Ordering::Acquire),
-    }
 }
 
 /// Keeps compiled host pipelines, and the list of title pipelines to start

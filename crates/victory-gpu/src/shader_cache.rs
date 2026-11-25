@@ -18,45 +18,11 @@ use victory_shader::emit::{HostShader, StaticSampler, UserData};
 use victory_shader::resource::RootIndexedView;
 use victory_shader::{HwStage, RootType};
 
-// The embedding application may choose a cache directory explicitly. When
-// it does not, keep translations in a persistent per-user directory so
-// rebuilding the same shaders on every launch is not the default behavior.
 static CACHE: OnceLock<Cache> = OnceLock::new();
-static DEFAULT_CACHE: OnceLock<Option<Cache>> = OnceLock::new();
-
-fn cache() -> Option<&'static Cache> {
-    if let Some(cache) = CACHE.get() {
-        return Some(cache);
-    }
-    DEFAULT_CACHE
-        .get_or_init(|| {
-            let dir = std::env::var_os("VICTORY_SHADER_CACHE")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("LOCALAPPDATA")
-                        .map(PathBuf::from)
-                        .map(|path| path.join("Victory").join("ShaderCache"))
-                })
-                .unwrap_or_else(|| std::env::temp_dir().join("Victory").join("ShaderCache"));
-            tracing::info!(path = %dir.display(), "using persistent translated-shader cache");
-            match Cache::open(dir) {
-                Ok(cache) => Some(cache),
-                Err(e) => {
-                    tracing::warn!(error = %e, "no persistent shader cache; shaders will be translated each run");
-                    None
-                }
-            }
-        })
-        .as_ref()
-}
-
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 
-/// Keeps translated shaders in `dir` from now on. Must be called before
-/// the first shader translation; otherwise a persistent per-user directory
-/// is selected automatically.
+/// Keeps translated shaders in `dir` from now on.
 pub fn use_shader_cache(dir: PathBuf) {
     match Cache::open(dir) {
         Ok(cache) => {
@@ -88,6 +54,10 @@ fn build() -> &'static [u8; 32] {
         match exe {
             Ok(mut bytes) => {
                 bytes.extend_from_slice(&limit.to_le_bytes());
+                // So is the view heap's null slot (it differs by host GPU):
+                // a translation cached without the clamp must not be served.
+                crate::descriptor::host::probe_view_limit();
+                bytes.extend_from_slice(&victory_shader::emit::view_heap_limit().to_le_bytes());
                 // Which group barriers wait is part of the translation too.
                 bytes.push(victory_shader::emit::group_sync());
                 // So are the switches that pick the form of a wave64 program:
@@ -127,7 +97,7 @@ fn build() -> &'static [u8; 32] {
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
-    match cache() {
+    match CACHE.get() {
         Some(cache) => cached(cache, build(), container, translate),
         None => translate(container),
     }

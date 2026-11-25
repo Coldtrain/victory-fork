@@ -7,13 +7,13 @@
 //! title's GPU watchdog ended the run (decision 0007, "Pipelines made off
 //! the title's threads").
 //!
-//! Pipeline creation queues the host PSO on a worker immediately. This is
-//! creation-time precompilation: the title's description is captured before
-//! the first draw, and the compiled result is persisted for later launches.
-//! Ordinary graphics and compute work may use the bounded per-frame wait;
-//! if the pipeline is not ready, that individual submission is skipped.
-//! Mesh pipelines are different: their one-shot dispatches cannot be replayed,
-//! so first use waits for the worker to finish (or refuse) the mesh PSO.
+//! A first use queues the pipeline and waits for it within a budget per
+//! frame, so the cheap ones (menus, one-off passes such as a colour-grading
+//! bake) are there at once as before; past the budget a draw or dispatch
+//! whose pipeline is not ready is dropped, as an untranslated one is.
+//!
+//! The default budget is half a second per title frame. A pass the title
+//! runs only once and whose pipeline takes longer is lost.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -22,13 +22,6 @@ use std::time::{Duration, Instant};
 
 use super::Shader;
 use super::host::{GraphicsState, HostPipeline};
-
-/// Pipelines discovered and completed in this process. A pipeline is counted
-/// complete even when translation or host PSO creation fails.
-pub(crate) static DISCOVERED: AtomicU64 = AtomicU64::new(0);
-pub(crate) static COMPLETED: AtomicU64 = AtomicU64::new(0);
-/// Discovered pipeline descriptions whose host PSO could not be created.
-pub(crate) static FAILED: AtomicU64 = AtomicU64::new(0);
 
 /// What a host pipeline is made from, and the host pipeline once made.
 pub(crate) struct Pending {
@@ -50,11 +43,6 @@ unsafe impl Sync for Pending {}
 
 impl Pending {
     pub(crate) fn new(shaders: Vec<Arc<Shader>>, graphics: Option<Box<GraphicsState>>) -> Pending {
-        // Empty descriptions have no shader or host PSO to precompile;
-        // exclude them from the startup barrier's discovered total.
-        if !shaders.is_empty() {
-            DISCOVERED.fetch_add(1, Ordering::Relaxed);
-        }
         let mut key = blake3::Hasher::new();
         for s in &shaders {
             key.update(s.stage.as_bytes());
@@ -72,14 +60,8 @@ impl Pending {
     }
 
     fn make(&self) {
-        self.made.get_or_init(|| {
-            let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());
-            if made.is_none() {
-                FAILED.fetch_add(1, Ordering::Relaxed);
-            }
-            COMPLETED.fetch_add(1, Ordering::Relaxed);
-            made
-        });
+        self.made
+            .get_or_init(|| HostPipeline::new(&self.shaders, self.graphics.as_deref()));
         let (lock, done) = &DONE;
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
@@ -112,14 +94,14 @@ pub(crate) fn missing(p: &Pending) -> Option<String> {
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
-/// Optional waiting allowed per title frame, over all threads.
+/// Waiting allowed per title frame, over all threads.
 fn wait_budget() -> Duration {
     static BUDGET: OnceLock<Duration> = OnceLock::new();
     *BUDGET.get_or_init(|| {
         let millis = std::env::var("VICTORY_PIPELINE_WAIT_MS")
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(0);
+            .unwrap_or(500);
         tracing::info!(millis, "host pipeline wait budget per frame");
         Duration::from_millis(millis)
     })
@@ -143,13 +125,7 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     }
     if p.made.get().is_none() {
         start(p, REQUESTED);
-        if p.shaders.iter().any(|shader| shader.stage == "mesh") {
-            // Mesh dispatches cannot be replayed after recording. Make the
-            // PSO synchronously rather than dropping a one-shot geometry batch.
-            now(p);
-        } else {
-            wait(p, crate::frame::current());
-        }
+        wait(p, crate::frame::current());
     }
     p.made.get()?.as_ref()
 }
@@ -161,38 +137,10 @@ pub(crate) fn now(p: &Arc<Pending>) -> bool {
     p.made.get().is_some_and(|made| made.is_some())
 }
 
-/// Whether creation-time pipeline precompilation is enabled. This is on
-/// by default: the title's pipeline descriptions are the only authoritative
-/// source for the host PSO state, so queue each one as soon as it is known.
-/// Set VICTORY_PIPELINE_PRECOMPILE=0 to restore first-use compilation.
-fn precompile_on_create() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        let on = std::env::var_os("VICTORY_PIPELINE_PRECOMPILE")
-            .is_none_or(|value| value != "0");
-        tracing::info!(enabled = on, "creation-time host pipeline precompilation");
-        on
-    })
-}
-
-/// At title pipeline creation, preserve its key for the next run and queue
-/// the host PSO immediately. This is the precompiler: shader translation and
-/// D3D12 PSO creation run on the pipeline workers before the first draw asks
-/// for the pipeline. Previously only pipelines used in a prior run were
-/// queued here, leaving first-run discovery entirely demand-driven.
+/// At the title's creation of a pipeline: starts it at once if an earlier
+/// run drew with it (during loading, so the world's first frames find it).
 pub(crate) fn early(p: &Arc<Pending>) {
-    if p.shaders.is_empty() {
-        return;
-    }
-
-    // Persist every discovered description, not just descriptions that
-    // happened to reach a draw. The next launch can prewarm these as soon
-    // as the title recreates them during its own initialization.
-    if !p.used.swap(true, Ordering::Relaxed) {
-        super::library::note_used(&p.key);
-    }
-
-    if precompile_on_create() || super::library::wanted_early(&p.key) {
+    if !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
         start(p, EARLY);
     }
@@ -400,14 +348,6 @@ fn drained() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Mesh first use creates the pipeline before returning to the caller.
-    #[test]
-    fn mesh_first_use_is_made_before_dispatch() {
-        let p = Arc::new(Pending::new(Vec::new(), None));
-        assert!(!now(&p));
-        assert!(matches!(p.made.get(), Some(None)));
-    }
 
     /// A first use queues the pipeline and, within the budget, gets the
     /// worker's answer (here: no host pipeline for no shaders).
