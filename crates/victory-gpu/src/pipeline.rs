@@ -709,6 +709,91 @@ pub(crate) fn library_removal_note() -> String {
     library::removal_note()
 }
 
+/// Live shader translation and host pipeline preparation progress.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StartupProgress {
+    pub discovered: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub queued: u64,
+    pub library_loaded: u64,
+    pub library_compiled: u64,
+    pub shaders_discovered: u64,
+    pub shaders_cached: u64,
+    pub shaders_translated: u64,
+    pub discovery_complete: bool,
+}
+
+#[cfg(windows)]
+static STARTUP_GATE_ENTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
+static STARTUP_PRESENTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
+static STARTUP_BYPASS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Let the loading UI release the first-frame compilation barrier.
+#[cfg(windows)]
+pub fn bypass_startup_wait() {
+    STARTUP_BYPASS.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Hold the first present until the initial pipeline batch is compiled.
+#[cfg(windows)]
+pub(crate) fn startup_wait_before_present() {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    if STARTUP_GATE_ENTERED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    STARTUP_PRESENTED.store(true, Ordering::Release);
+    if std::env::var_os("VICTORY_PIPELINE_PRECOMPILE").is_some_and(|v| v == "0") {
+        tracing::warn!("startup pipeline barrier disabled with VICTORY_PIPELINE_PRECOMPILE=0");
+        return;
+    }
+
+    let mut last_discovered = make::DISCOVERED.load(Ordering::Acquire);
+    let mut quiet_since = Instant::now();
+    loop {
+        if STARTUP_BYPASS.load(Ordering::Acquire) {
+            tracing::warn!("startup pipeline compilation wait bypassed by user");
+            return;
+        }
+        let discovered = make::DISCOVERED.load(Ordering::Acquire);
+        if discovered != last_discovered {
+            last_discovered = discovered;
+            quiet_since = Instant::now();
+        }
+        let completed = make::COMPLETED.load(Ordering::Acquire);
+        let failed = make::FAILED.load(Ordering::Acquire);
+        let queued = make::waiting();
+        if completed >= discovered && failed == 0 && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(discovered, completed, "initial pipeline batch compiled before first present");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Current shader and pipeline preparation counters for the loading UI.
+#[cfg(windows)]
+pub fn startup_progress() -> StartupProgress {
+    let (shaders_cached, shaders_translated) = crate::shader_cache::counts();
+    StartupProgress {
+        discovered: make::DISCOVERED.load(std::sync::atomic::Ordering::Relaxed),
+        completed: make::COMPLETED.load(std::sync::atomic::Ordering::Relaxed),
+        failed: make::FAILED.load(std::sync::atomic::Ordering::Relaxed),
+        queued: make::waiting(),
+        library_loaded: library::LOADED.load(std::sync::atomic::Ordering::Relaxed),
+        library_compiled: library::MADE.load(std::sync::atomic::Ordering::Relaxed),
+        shaders_discovered: KEPT[0].load(std::sync::atomic::Ordering::Relaxed),
+        shaders_cached,
+        shaders_translated,
+        discovery_complete: STARTUP_PRESENTED.load(std::sync::atomic::Ordering::Acquire),
+    }
+}
+
 /// Keeps compiled host pipelines, and the list of title pipelines to start
 /// early, in `dir` (a folder of the cache) across runs.
 #[cfg(windows)]
