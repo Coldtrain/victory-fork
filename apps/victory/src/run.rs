@@ -170,7 +170,7 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
 
     let mut last_discovered = 0;
     let mut last_change = Instant::now();
-    let mut shown = false;
+    let mut first_paint = true;
     loop {
         if stop.load(std::sync::atomic::Ordering::Acquire) {
             break;
@@ -199,8 +199,14 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
         let width = 36usize;
         let filled = (width as f64 * ratio).floor() as usize;
         let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
+        if first_paint {
+            eprint!("\\x1b[2J\\x1b[H");
+            first_paint = false;
+        } else {
+            eprint!("\\x1b[H");
+        }
         eprint!(
-            "\rVICTORY PIPELINE PRECOMPILATION\n[{bar}] {percent:3}%  pipelines {}/{}  pending {}\nShaders: {} discovered | {} cache hits | {} translated\nHost PSOs: {} loaded from library | {} newly compiled\nDiscovery: {}",
+            "VICTORY PIPELINE PRECOMPILATION\\n[{bar}] {percent:3}%  pipelines {}/{}  pending {}\\nShaders: {} discovered | {} cache hits | {} translated\\nHost PSOs: {} loaded from library | {} newly compiled\\nDiscovery: {}",
             p.completed,
             p.discovered,
             p.queued,
@@ -213,16 +219,13 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
         );
         if settled {
             eprintln!("\nStartup pipeline batch compiled. Continuing.");
-            shown = true;
             break;
         }
-        shown = true;
         let _ = io::stderr().flush();
         std::thread::sleep(Duration::from_millis(200));
     }
-    if shown {
-        eprintln!();
-    }
+    eprint!("\\x1b[2J\\x1b[H");
+    let _ = io::stderr().flush();
     drop(input);
 }
 
