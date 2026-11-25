@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 fn collect(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) {
+    println!("cargo:rerun-if-changed={}", dir.display());
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .expect("read translator source directory")
         .map(|entry| entry.expect("read translator source entry").path())
@@ -28,7 +29,7 @@ fn main() {
 
     let mut hash = blake3::Hasher::new();
     for path in files {
-        let name = path.to_string_lossy().replace('\\\\', "/");
+        let name = path.to_string_lossy();
         let full = root.join(&path);
         println!("cargo:rerun-if-changed={}", full.display());
         hash.update(name.as_bytes());
