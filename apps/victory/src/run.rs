@@ -148,9 +148,9 @@ pub fn run(
 
 
 /// Draws a live terminal loading screen while the title discovers and
-/// precompiles its host shaders and pipelines. Enter dismisses the screen;
-/// background compilation continues. The screen also closes automatically
-/// after first-present discovery has gone quiet and all queued work drains.
+/// precompiles the initial host shader and pipeline batch. The first host
+/// present is blocked until that batch succeeds. Enter bypasses the barrier;
+/// compilation continues in the background.
 #[cfg(windows)]
 fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     use std::io::{self, BufRead, Write};
@@ -188,6 +188,7 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
         }
         let settled = p.discovery_complete
             && p.completed >= p.discovered
+            && p.failed == 0
             && p.queued == 0
             && last_change.elapsed() >= Duration::from_secs(5);
 
@@ -207,16 +208,17 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
             eprint!("\x1b[H");
         }
         eprint!(
-            "VICTORY PIPELINE PRECOMPILATION\n[{bar}] {percent:3}%  pipelines {}/{}  pending {}\nShaders: {} discovered | {} cache hits | {} translated\nHost PSOs: {} loaded from library | {} newly compiled\nDiscovery: {}",
+            "VICTORY PIPELINE PRECOMPILATION\n[{bar}] {percent:3}%  pipelines {}/{}  pending {} | failed {}\nShaders: {} discovered | {} cache hits | {} translated\nHost PSOs: {} loaded from library | {} newly compiled\nDiscovery: {}",
             p.completed,
             p.discovered,
             p.queued,
+            p.failed,
             p.shaders_discovered,
             p.shaders_cached,
             p.shaders_translated,
             p.library_loaded,
             p.library_compiled,
-            if p.discovery_complete { "first frame presented; waiting for pipeline queue to drain" } else { "discovering title pipelines" },
+            if p.discovery_complete { "first-frame gate active; waiting for initial pipeline batch" } else { "discovering title pipelines" },
         );
         if settled {
             eprintln!("\nStartup pipeline batch compiled. Continuing.");
