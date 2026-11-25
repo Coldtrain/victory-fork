@@ -1713,7 +1713,7 @@ impl State {
             // that only part of the view's title memory is resident. Do not
             // scan the same pages again in staged() merely to learn !whole.
             let (bytes, whole) = if partly.is_some() {
-                (crate::texture::staged_bytes(resource).unwrap_or(0), false)
+                crate::texture::staged_bytes(resource).map_or((0, true), |bytes| (bytes, false))
             } else {
                 crate::texture::staged(resource).unwrap_or((0, true))
             };
