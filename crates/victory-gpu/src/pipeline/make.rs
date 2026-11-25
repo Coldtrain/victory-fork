@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use super::Shader;
 use super::host::{GraphicsState, HostPipeline};
 
-/// What a host pipeline is made from, and the host pipeline once made.
+/// Pipelines discovered and completed in this process. A pipeline is counted\n/// complete even when translation or host PSO creation fails.\npub(crate) static DISCOVERED: AtomicU64 = AtomicU64::new(0);\npub(crate) static COMPLETED: AtomicU64 = AtomicU64::new(0);\n\n/// What a host pipeline is made from, and the host pipeline once made.
 pub(crate) struct Pending {
     shaders: Vec<Arc<Shader>>,
     pub(crate) graphics: Option<Box<GraphicsState>>,
