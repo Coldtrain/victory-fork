@@ -124,9 +124,40 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     }
     if p.made.get().is_none() {
         start(p, REQUESTED);
-        wait(p, crate::frame::current());
+        if p.shaders.iter().any(|shader| shader.stage == "mesh") {
+            // Mesh pipelines produce world geometry. Dropping their first
+            // dispatch while a worker compiles the PSO makes one-shot
+            // meshlet batches disappear for the entire scene. Keep the
+            // recording thread on this dispatch until the worker has either
+            // produced the PSO or definitively refused it.
+            wait_made(p);
+        } else {
+            wait(p, crate::frame::current());
+        }
     }
     p.made.get()?.as_ref()
+}
+
+/// Mesh work cannot be replayed after the command list has moved on. Wait
+/// for its asynchronously-created PSO rather than silently losing that
+/// dispatch on first use.
+fn wait_made(p: &Pending) {
+    let started = Instant::now();
+    let (lock, done) = &DONE;
+    let mut held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while p.made.get().is_none() {
+        held = done.wait(held).unwrap_or_else(|e| e.into_inner());
+    }
+    drop(held);
+    let elapsed = started.elapsed();
+    if elapsed >= Duration::from_millis(10) {
+        tracing::info!(wait_ms = elapsed.as_millis(), "waited for first mesh pipeline");
+    }
+    #[cfg(feature = "diagnostics")]
+    crate::copystat::add(
+        crate::copystat::C::PipelineWaitUs,
+        elapsed.as_micros() as u64,
+    );
 }
 
 /// Makes `p` on this thread if it is not made yet (waiting for a worker
