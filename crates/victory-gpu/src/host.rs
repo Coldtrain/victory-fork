@@ -5855,13 +5855,14 @@ impl Meter {
         let picked = crate::draw::HEAP_BUFFER_PASSES.swap(0, Ordering::Relaxed) as f64 / frames;
         let picked_ms =
             crate::draw::HEAP_BUFFER_MICROS.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames;
-        let [scan_us, spans_us, refresh_us, textures_us, slots, changed, views, copies, bytes] =
-            [0, 1, 2, 3, 4, 5, 6, 7, 8].map(|i| {
+        let [setup_us, scan_us, spans_us, refresh_us, textures_us, slots, changed, views, copies, bytes] =
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(|i| {
                 crate::draw::HEAP_BUFFER_PHASES[i].swap(0, Ordering::Relaxed) as f64 / frames
             });
         if picked > 0.0 {
             tracing::info!(
-                "heap buffer pass breakdown per frame: scan {scan:.2} ms, merge spans {spans:.2} ms, refresh buffers {refresh:.2} ms, prepare textures {textures:.2} ms; examined {slots:.0} slots ({changed:.0} changed), {views:.0} live buffer views across {copies:.0} copies, {mb:.1} MB",
+                "heap buffer pass breakdown per frame: setup {setup:.2} ms, scan {scan:.2} ms, merge spans {spans:.2} ms, refresh buffers {refresh:.2} ms, prepare textures {textures:.2} ms; examined {slots:.0} slots ({changed:.0} changed), {views:.0} live buffer views across {copies:.0} copies, {mb:.1} MB",
+                setup = setup_us / 1e3,
                 scan = scan_us / 1e3,
                 spans = spans_us / 1e3,
                 refresh = refresh_us / 1e3,
