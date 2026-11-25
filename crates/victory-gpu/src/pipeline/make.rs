@@ -28,6 +28,30 @@ pub(crate) static DISCOVERED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static COMPLETED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FAILED: AtomicU64 = AtomicU64::new(0);
 
+// Every pipeline description created during title initialization. The first
+// present snapshots this list and queues the entire startup batch, rather than
+// only pipelines remembered by the cross-run cache.
+static STARTUP: Mutex<Vec<std::sync::Weak<Pending>>> = Mutex::new(Vec::new());
+
+pub(crate) fn discover(p: &Arc<Pending>) {
+    if !p.shaders.is_empty() {
+        STARTUP.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(p));
+    }
+}
+
+/// Queue every pipeline discovered before the first present.
+pub(crate) fn precompile_startup_batch() -> u64 {
+    let pending = {
+        let mut startup = STARTUP.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *startup).into_iter().filter_map(|p| p.upgrade()).collect::<Vec<_>>()
+    };
+    let count = pending.len() as u64;
+    for p in pending {
+        start(&p, EARLY);
+    }
+    count
+}
+
 /// What a host pipeline is made from, and the host pipeline once made.
 pub(crate) struct Pending {
     shaders: Vec<Arc<Shader>>,
