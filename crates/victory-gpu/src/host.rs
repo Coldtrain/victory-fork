@@ -1792,7 +1792,8 @@ static QUEUE_ORDER: Mutex<u64> = Mutex::new(0);
 /// Since the last frame-rate line, of the thread that lands flights
 /// ([`relay`]): landings, flights landed, microseconds it waited for the
 /// card with nothing to land, microseconds it waited for fetches of card
-/// copies' pieces, microseconds of landing in all.
+/// copies' pieces, microseconds of landing in all, and CPU time merging
+/// the fetched pieces into title memory.
 static RELAY_STATS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 
 /// Of the line's things in order (a flight: the value signalled on the
