@@ -657,7 +657,7 @@ mod tests {
             (1, 1 << 16, 2 << 16, 4 << 16),
         ];
         assert_eq!(
-            super::card_fetch_runs(&pieces),
+            super::Host::card_fetch_runs(&pieces),
             [
                 (0, 0, 0, 2 << 16),
                 (0, 3 << 16, 2 << 16, 1 << 16),
@@ -675,7 +675,7 @@ mod tests {
             (1, 4 << 16, 5 << 16, 4 << 16),
         ];
         assert_eq!(
-            super::card_fetch_runs(&pieces),
+            super::Host::card_fetch_runs(&pieces),
             [
                 (0, 0, 0, 1 << 16),
                 (0, 2 << 16, 1 << 16, 1 << 16),
@@ -3603,7 +3603,7 @@ fn card_fetch_runs(pieces: &[(usize, usize, usize, u64)]) -> Vec<(usize, u64, u6
                     // in one declared range are contiguous in both resources.
                     // Batch those copies without changing the per-piece merge
                     // records below.
-                    for (i, lo, at, bytes) in card_fetch_runs(&pieces) {
+                    for (i, lo, at, bytes) in Self::card_fetch_runs(&pieces) {
                         list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo, bytes);
                     }
                     list.Close()?;
