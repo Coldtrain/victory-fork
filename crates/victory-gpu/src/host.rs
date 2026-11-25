@@ -6052,12 +6052,28 @@ fn title_window() -> Option<HWND> {
         // SAFETY: a window handle from the enumeration; `found` is ours.
         unsafe {
             GetWindowThreadProcessId(hwnd, Some(&mut process));
-            if process == windows::Win32::System::Threading::GetCurrentProcessId()
-                && IsWindowVisible(hwnd).as_bool()
+            if process != windows::Win32::System::Threading::GetCurrentProcessId()
+                || !IsWindowVisible(hwnd).as_bool()
             {
-                *(found.0 as *mut Option<HWND>) = Some(hwnd);
-                return false.into();
+                return true.into();
             }
+
+            // The startup progress window is a separate, temporary topmost
+            // window. It must never be selected as the DXGI swap-chain target:
+            // the title's first present happens while that window is visible,
+            // and destroying it after precompilation would leave the swap chain
+            // attached to a dead HWND.
+            let mut class_name = [0u16; 128];
+            let length = GetClassNameW(hwnd, &mut class_name);
+            if length > 0
+                && String::from_utf16_lossy(&class_name[..length as usize])
+                    == "VictoryShaderLoadingWindow"
+            {
+                return true.into();
+            }
+
+            *(found.0 as *mut Option<HWND>) = Some(hwnd);
+            return false.into();
         }
         true.into()
     }
