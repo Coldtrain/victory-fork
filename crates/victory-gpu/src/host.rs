@@ -686,6 +686,40 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_relay_fetch_pieces_share_one_copy_command() {
+        let pieces = [
+            (10, 0, 1 << 16, 0),
+            (10, 1 << 16, 2 << 16, 1 << 16),
+            (10, 3 << 16, 4 << 16, 2 << 16),
+            (20, 0, 1 << 16, 3 << 16),
+            (20, 1 << 16, 2 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::relay_fetch_runs(&pieces),
+            [(0, 2 << 16), (2, 1 << 16), (3, 2 << 16)]
+        );
+    }
+
+    #[test]
+    fn relay_fetch_runs_do_not_join_gaps_or_distinct_copies() {
+        let pieces = [
+            (10, 0, 1 << 16, 0),
+            (10, 2 << 16, 3 << 16, 1 << 16),
+            (10, 3 << 16, 4 << 16, 3 << 16),
+            (20, 4 << 16, 5 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::relay_fetch_runs(&pieces),
+            [
+                (0, 1 << 16),
+                (1, 1 << 16),
+                (2, 1 << 16),
+                (3, 1 << 16),
+            ]
+        );
+    }
+
+    #[test]
     fn sparse_copies_preserve_islands_and_observe_remaps() {
         use windows_sys::Win32::System::Memory::*;
         const N: usize = 5 << 16;
@@ -3355,7 +3389,11 @@ impl Host {
             (|| -> windows::core::Result<u64> {
                 allocator.Reset()?;
                 list.Reset(&allocator, None)?;
-                for (first, bytes) in relay_fetch_runs(&pieces) {
+                let fetch_keys: Vec<_> = pieces
+                    .iter()
+                    .map(|(copy, _, lo, hi, at)| (*copy, *lo, *hi, *at))
+                    .collect();
+                for (first, bytes) in relay_fetch_runs(&fetch_keys) {
                     let (_, shadow, lo, _, at) = &pieces[first];
                     list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, bytes);
                 }
@@ -3546,19 +3584,16 @@ fn card_fetch_runs(pieces: &[(usize, usize, usize, u64)]) -> Vec<(usize, u64, u6
 /// Adjacent relay pieces from the same shadow occupy contiguous source and
 /// readback offsets. Return the first piece and combined byte count for each
 /// run; the original pieces remain intact for their individual merges.
-fn relay_fetch_runs(
-    pieces: &[(usize, Arc<crate::shadow::Shadow>, usize, usize, u64)],
-) -> Vec<(usize, u64)> {
+fn relay_fetch_runs(pieces: &[(usize, usize, usize, u64)]) -> Vec<(usize, u64)> {
     let mut runs: Vec<(usize, u64)> = Vec::with_capacity(pieces.len());
-    for (index, (copy, shadow, from, to, fetched_at)) in pieces.iter().enumerate() {
+    for (index, &(copy, from, to, fetched_at)) in pieces.iter().enumerate() {
         let bytes = (to - from) as u64;
         match runs.last_mut() {
             Some(last) => {
-                let first = &pieces[last.0];
-                if first.0 == *copy
-                    && Arc::ptr_eq(&first.1, shadow)
-                    && first.2 as u64 + last.1 == *from as u64
-                    && first.4 + last.1 == *fetched_at
+                let first = pieces[last.0];
+                if first.0 == copy
+                    && first.1 as u64 + last.1 == from as u64
+                    && first.3 + last.1 == fetched_at
                 {
                     last.1 += bytes;
                     continue;
