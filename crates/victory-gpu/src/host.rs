@@ -5800,10 +5800,23 @@ impl Meter {
                 .iter()
                 .map(|phase| phase.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames)
                 .collect();
+            let texture_detail: Vec<f64> = crate::draw::HEAP_TEXTURE_DETAIL
+                .iter()
+                .map(|phase| phase.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames)
+                .collect();
+            let texture_counts: Vec<u64> = crate::draw::HEAP_TEXTURE_COUNTS
+                .iter()
+                .map(|count| count.swap(0, Ordering::Relaxed))
+                .collect();
             tracing::info!(
                 "indexed heap preparation per frame: {:.1} ms descriptor-slot mirroring, {:.1} ms span aggregation, {:.1} ms buffer refreshes, {:.1} ms indexed-texture uploads; texture pass: {:.1} ms due-queue census, {:.1} ms slot lookup/mapping, {:.1} ms mirror/classification, {:.1} ms staging/readable checks, {:.1} ms total loop",
                 heap_phases[0], heap_phases[1], heap_phases[2], heap_phases[3],
                 texture_phases[0], texture_phases[1], texture_phases[2], texture_phases[3], texture_phases[4]
+            );
+            tracing::info!(
+                "indexed texture detail per frame: {:.2} ms descriptor decode, {:.2} ms mapped-page query, {:.2} ms host mirror, {:.2} ms resource/staging metadata, {:.2} ms readability validation; slots per report: {} due, {} examined, {} placed, {} unmapped, {} partial, {} mirrored, {} uploaded",
+                texture_detail[0], texture_detail[1], texture_detail[2], texture_detail[3], texture_detail[4],
+                texture_counts[0], texture_counts[1], texture_counts[2], texture_counts[3], texture_counts[4], texture_counts[5], texture_counts[6]
             );
         }
         // Copies between depth textures and their colour twins, each way.
