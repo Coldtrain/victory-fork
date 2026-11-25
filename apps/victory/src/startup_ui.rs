@@ -16,10 +16,9 @@ use windows_sys::Win32::{
     UI::{Input::KeyboardAndMouse::VK_RETURN, WindowsAndMessaging::{
         CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
         DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics, IDC_ARROW,
-        LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
+        GetClientRect, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
         TranslateMessage, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
         WM_TIMER, WNDCLASSW, WS_CHILD, WS_VISIBLE,
-        SM_CXSCREEN, SM_CYSCREEN,
     }},
 };
 
@@ -197,11 +196,17 @@ pub(super) fn run(stop: Arc<AtomicBool>) {
             }
             std::thread::sleep(Duration::from_millis(25));
         };
-        let x = (GetSystemMetrics(SM_CXSCREEN) - WIDTH) / 2;
-        let y = (GetSystemMetrics(SM_CYSCREEN) - HEIGHT) / 2;
+        let mut client: RECT = std::mem::zeroed();
+        GetClientRect(parent, &mut client);
+        let parent_width = client.right - client.left;
+        let parent_height = client.bottom - client.top;
+        let x = (parent_width - WIDTH) / 2;
+        let y = (parent_height - HEIGHT) / 2;
+        let width = WIDTH.min(parent_width.max(1));
+        let height = HEIGHT.min(parent_height.max(1));
         let hwnd = CreateWindowExW(
             0, class.as_ptr(), title.as_ptr(), WS_CHILD | WS_VISIBLE,
-            x.max(0), y.max(0), WIDTH, HEIGHT, parent,
+            x.max(0), y.max(0), width, height, parent,
             std::ptr::null_mut(), instance, std::ptr::null(),
         );
         if hwnd.is_null() { return; }
