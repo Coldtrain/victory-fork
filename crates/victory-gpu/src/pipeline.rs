@@ -723,7 +723,7 @@ pub(crate) fn library_removal_note() -> String {
     library::removal_note()
 }
 
-/// Keeps compiled host pipelines, and the list of title pipelines to start
+/// Live startup/cache statistics for the loading UI. `discovered` is the\n/// number of title pipeline descriptions seen this run; `completed` includes\n/// both successful and refused host pipeline creations.\n#[cfg(windows)]\n#[derive(Clone, Copy, Debug, Default)]\npub struct StartupProgress {\n    pub discovered: u64,\n    pub completed: u64,\n    pub queued: u64,\n    pub library_loaded: u64,\n    pub library_compiled: u64,\n    pub shaders_cached: u64,\n    pub shaders_translated: u64,\n}\n\n/// Current shader and pipeline preparation counters.\n#[cfg(windows)]\npub fn startup_progress() -> StartupProgress {\n    let (shaders_cached, shaders_translated) = crate::shader_cache::counts();\n    StartupProgress {\n        discovered: make::DISCOVERED.load(std::sync::atomic::Ordering::Relaxed),\n        completed: make::COMPLETED.load(std::sync::atomic::Ordering::Relaxed),\n        queued: make::waiting(),\n        library_loaded: library::LOADED.load(std::sync::atomic::Ordering::Relaxed),\n        library_compiled: library::MADE.load(std::sync::atomic::Ordering::Relaxed),\n        shaders_cached,\n        shaders_translated,\n    }\n}\n\n/// Keeps compiled host pipelines, and the list of title pipelines to start
 /// early, in `dir` (a folder of the cache) across runs.
 #[cfg(windows)]
 pub fn use_pipeline_cache(dir: std::path::PathBuf) {
