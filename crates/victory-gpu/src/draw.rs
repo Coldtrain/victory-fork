@@ -1413,6 +1413,7 @@ impl State {
             .entry(std::ptr::from_ref(host) as usize)
             .or_insert_with(|| (0, Ranges::new()));
         let changed = host.buffer_changes();
+        let changed_slots = changed.len() as u64;
         let slots = if *passes % 16 == 0 {
             ranges.clear();
             host.buffer_slots()
@@ -1420,7 +1421,6 @@ impl State {
             changed
         };
         *passes += 1;
-        let changed_slots = changed.len() as u64;
         // Whether the device was there before the pass: a view that removes
         // it is named below.
         static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
