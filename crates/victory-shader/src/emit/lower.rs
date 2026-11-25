@@ -20,6 +20,9 @@ use crate::native::{HwStage, NativeProgram, ResourceType, RootType, StageIo, Usa
 use crate::resource::{Address, CODE, MEMORY, Resources, Role, Site, Source};
 use crate::structure::{Atom, Bool, LaneExit, Structured};
 
+#[path = "packed_mask.rs"]
+mod packed_mask;
+
 /// The ray-tracing node test (`image_bvh_intersect_ray`), a child module so
 /// it shares the emitter's state.
 #[path = "intersect.rs"]
@@ -198,6 +201,8 @@ struct Lower<'a> {
     pending_masks: Vec<(V, usize, usize)>,
     data_phis: Vec<(V, usize, usize)>,
     read_phis: HashSet<Value>,
+    /// Numeric joins retained while rebuilding scalar bitwise operands.
+    packed_phis: HashSet<Value>,
     params: HashMap<Value, (usize, u32)>,
     user_data: Option<V>,
     user_reads: BTreeMap<u32, UserData>,
@@ -1483,6 +1488,7 @@ impl<'a> Lower<'a> {
             pending_masks: Vec::new(),
             data_phis: Vec::new(),
             read_phis: HashSet::new(),
+            packed_phis: HashSet::new(),
             stale: HashSet::new(),
             params: x.res.params.iter().map(|&(v, p, d)| (v, (p, d))).collect(),
             user_data: None,
@@ -2962,6 +2968,9 @@ impl<'a> Lower<'a> {
         if !self.x.st.active.contains(&lo) && !whole {
             if self.exchange.is_some() && !self.local {
                 need(made.unwrap_or(0));
+            }
+            if let Some(word) = self.packed_mask_word(v) {
+                return Ok(word);
             }
             return Err(MASK_ELSEWHERE);
         }
@@ -10711,6 +10720,11 @@ impl<'a> Lower<'a> {
                 let Some(qb) = self.tail[q] else { continue };
                 let qb = self.edges.get(&(q, b)).copied().unwrap_or(qb);
                 let arg = phi.args[n];
+                if self.packed_phis.contains(&phi.value) && self.impossible_forward_edge(q, b) {
+                    let ty = if bit { self.s.t.i1 } else { self.s.t.i32 };
+                    incoming.push((self.s.m.undef(ty), qb));
+                    continue;
+                }
                 if self.read_phis.contains(&phi.value) && !self.vals.contains_key(&arg) {
                     let _ = self.lazy_barycentric(arg);
                     // A root parameter nothing read before the join (user
@@ -10725,7 +10739,7 @@ impl<'a> Lower<'a> {
                 let x = match (self.vals.get(&arg).copied(), bit) {
                     (Some(Val::I32(x)), false) | (Some(Val::Bit(x)), true) => x,
                     (Some(Val::Missing(_)) | None, false)
-                        if numbers && self.dead(arg, &mut Vec::new()) =>
+                        if numbers && !self.packed_phis.contains(&phi.value) && self.dead(arg, &mut Vec::new()) =>
                     {
                         self.s.m.i32(0)
                     }
@@ -10813,7 +10827,7 @@ mod tests {
     };
     use crate::{io, ir, resource, structure};
 
-    const S_ENDPGM: u32 = 0xBF81_0000;
+    pub(super) const S_ENDPGM: u32 = 0xBF81_0000;
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {
@@ -11019,8 +11033,35 @@ mod tests {
         })
     }
 
+    pub(super) fn lower_compute(
+        words: &[u32], layout: Vec<RootParam>, used: Vec<UsedResource>, wave64: bool, lds: bool,
+    ) -> Result<Lowered, crate::ShaderError> {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let sgprs: u32 = layout.iter().map(|p| p.sgprs).sum();
+        let native = NativeProgram {
+            stage: HwStage::Cs,
+            wave64,
+            vgprs: 256,
+            layout,
+            used,
+            io: StageIo::Cs(ComputeIo {
+                rsrc2: u32::from(lds) << 15 | sgprs.max(2) << 1,
+                threads: [1, 1, 1],
+            }),
+            code,
+        };
+        let p = ir::build(&native.code, wave64, 256).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        let io = io::raise(&p, &native).unwrap();
+        lower(&Parts {
+            native: &native, p: &p, st: &st, io: &io, res: &res,
+            inputs: vec![], outputs: vec![], prims: vec![], mesh_stride: 0,
+        })
+    }
+
     /// Root parameter `slot` in user SGPRs from `user_data` on.
-    fn root(root: RootType, user_data: u8, slot: u8) -> RootParam {
+    pub(super) fn root(root: RootType, user_data: u8, slot: u8) -> RootParam {
         RootParam {
             root,
             table_offset_dwords: 0,
