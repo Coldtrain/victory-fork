@@ -213,6 +213,35 @@ fn stale_out() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_STALE_TEXTURES").is_none_or(|v| v != "0"))
 }
 
+/// Record a changed address range. Overlapping and adjacent notifications
+/// are coalesced; if the bounded queue fills, request a full tracked-span scan.
+fn record_remap(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64, limit: usize) -> bool {
+    if start >= end { return false; }
+    if let Some(last) = ranges.last_mut()
+        && last.0 <= end && start <= last.1
+    {
+        last.0 = last.0.min(start);
+        last.1 = last.1.max(end);
+    } else if ranges.len() >= limit {
+        ranges.clear();
+        ranges.push((0, u64::MAX));
+        return true;
+    } else {
+        ranges.push((start, end));
+    }
+    false
+}
+
+/// Merge ranges from interleaved producers before looking up descriptor spans.
+fn merge_remaps(ranges: &mut Vec<(u64, u64)>) {
+    ranges.sort_unstable();
+    ranges.dedup_by(|next, previous| {
+        if next.0 > previous.1 { return false; }
+        previous.1 = previous.1.max(next.1);
+        true
+    });
+}
+
 /// The runtime mapped or unmapped title memory `[at, at + len)`, or is
 /// about to write it through the kernel (`crate::watch`): the placed
 /// textures there may have arrived, gone, or changed with no descriptor
@@ -221,28 +250,19 @@ fn stale_out() -> bool {
 /// locks held: this locks one mutex of its own and calls nothing.
 pub(crate) fn remapped(at: usize, len: usize) {
     use std::sync::atomic::Ordering::Relaxed;
-    /// Ranges kept until a pass takes them.
-    const MOST: usize = 1 << 15;
+    /// Ranges kept until a pass takes them. The title can map tens of
+    /// thousands of pages between texture passes; overflow must not discard
+    /// notifications because that leaves already-uploaded textures stale.
+    const MOST: usize = 1 << 18;
     let (start, end) = (at as u64, at.saturating_add(len) as u64);
-    if end <= SPANNED[0].load(Relaxed) || start >= SPANNED[1].load(Relaxed) {
+    if start >= end || end <= SPANNED[0].load(Relaxed) || start >= SPANNED[1].load(Relaxed) {
         return;
     }
     let mut ranges = REMAPPED.lock().unwrap_or_else(|e| e.into_inner());
     STALE[1].fetch_add(1, Relaxed);
-    // Pages are mapped one after the other.
-    if let Some(last) = ranges.last_mut()
-        && last.1 == start
-    {
-        last.1 = end;
-        return;
+    if record_remap(&mut ranges, start, end, MOST) {
+        STALE[2].fetch_add(1, Relaxed);
     }
-    if ranges.len() >= MOST {
-        // No pass runs (no shader that picks textures by index is bound):
-        // the slots there are looked at when they are due, as before.
-        STALE[2].fetch_add(ranges.len() as u64, Relaxed);
-        ranges.clear();
-    }
-    ranges.push((start, end));
 }
 
 /// Frames for which a slot a draw read through a table counts as a table's
@@ -830,10 +850,11 @@ impl HostHeap {
     /// whose pass runs first takes them (a title has one view heap).
     pub(crate) fn texture_slots_remapped(&self, frame: u64) -> usize {
         use std::sync::atomic::Ordering::Relaxed;
-        let ranges = std::mem::take(&mut *REMAPPED.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut ranges = std::mem::take(&mut *REMAPPED.lock().unwrap_or_else(|e| e.into_inner()));
         if ranges.is_empty() {
             return 0;
         }
+        merge_remaps(&mut ranges);
         let mut slots: Vec<u32> = {
             let placed = self.placed.lock().unwrap_or_else(|e| e.into_inner());
             ranges.iter().flat_map(|&(start, end)| placed.slots_in(start, end)).collect()
@@ -2490,5 +2511,33 @@ mod tests {
         heap.release(a, 50);
         assert_eq!(heap.dynamic(50), Some(4));
         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
+    }
+}
+
+
+#[cfg(test)]
+mod remap_range_tests {
+    use super::{merge_remaps, record_remap};
+
+    #[test]
+    fn overlapping_and_adjacent_remaps_are_coalesced() {
+        let mut ranges = Vec::new();
+        assert!(!record_remap(&mut ranges, 0x2000, 0x3000, 8));
+        assert!(!record_remap(&mut ranges, 0x1000, 0x2000, 8));
+        assert!(!record_remap(&mut ranges, 0x2800, 0x4000, 8));
+        merge_remaps(&mut ranges);
+        assert_eq!(ranges, [(0x1000, 0x4000)]);
+    }
+
+    #[test]
+    fn a_full_remap_queue_falls_back_to_a_full_rescan() {
+        let mut ranges = Vec::new();
+        assert!(!record_remap(&mut ranges, 0x1000, 0x2000, 2));
+        assert!(!record_remap(&mut ranges, 0x4000, 0x5000, 2));
+        assert!(record_remap(&mut ranges, 0x7000, 0x8000, 2));
+        assert_eq!(ranges, [(0, u64::MAX)]);
+        assert!(!record_remap(&mut ranges, 0x9000, 0xa000, 2));
+        merge_remaps(&mut ranges);
+        assert_eq!(ranges, [(0, u64::MAX)]);
     }
 }
