@@ -378,6 +378,16 @@ fn drained() {
 mod tests {
     use super::*;
 
+    /// The mesh path waits on the worker notification rather than
+    /// returning while the pipeline is still pending.
+    #[test]
+    fn wait_made_observes_worker_completion() {
+        let p = Arc::new(Pending::new(Vec::new(), None));
+        start(&p, REQUESTED);
+        wait_made(&p);
+        assert!(matches!(p.made.get(), Some(None)));
+    }
+
     /// A first use queues the pipeline and, within the budget, gets the
     /// worker's answer (here: no host pipeline for no shaders).
     #[test]
