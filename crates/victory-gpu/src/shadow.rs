@@ -571,29 +571,6 @@ fn outside(from: usize, to: usize, mut skip: Vec<(usize, usize)>) -> Vec<(usize,
     outside_reuse(from, to, &mut skip)
 }
 
-/// As `outside`, sorting the caller's reusable scratch vector in place.
-fn outside_reuse(from: usize, to: usize, skip: &mut Vec<(usize, usize)>) -> Vec<(usize, usize)> {
-    skip.sort_unstable();
-    let mut out = Vec::new();
-    let mut at = from;
-    for &(a, b) in skip.iter() {
-        if b <= at {
-            continue;
-        }
-        if a >= to {
-            break;
-        }
-        if a > at {
-            out.push((at, a));
-        }
-        at = at.max(b);
-    }
-    if at < to {
-        out.push((at, to));
-    }
-    out
-}
-
 #[cfg(test)]
 mod relay_tests {
     use super::{Flights, changed_runs, merge_piece, outside};
@@ -2640,11 +2617,29 @@ impl Shadow {
         title.resize(n, 0);
         let mapped = crate::host::read_into((start + at) as *const u8, title);
         let mut changed = false;
-        for (a, b) in outside_reuse(at, at + n, skip) {
-            let (a, b) = (a - at, b - at);
-            // Title memory that is not mapped: the CPU's side keeps what
-            // the card wrote, as before; `title` is scratch then.
-            changed |= merge_piece(&gpu[a..b], &mut held[a..b], &mut title[a..b]);
+        // Walk the excluded intervals in place. Building an additional Vec
+        // of gaps for every 64 KiB piece would retain allocator traffic even
+        // after reusing `skip` itself.
+        skip.sort_unstable();
+        let mut cursor = at;
+        for &(a, b) in skip.iter() {
+            if b <= cursor {
+                continue;
+            }
+            if a >= at + n {
+                break;
+            }
+            if a > cursor {
+                let (lo, hi) = (cursor - at, a.min(at + n) - at);
+                // Title memory that is not mapped: the CPU's side keeps
+                // what the card wrote, as before; `title` is scratch then.
+                changed |= merge_piece(&gpu[lo..hi], &mut held[lo..hi], &mut title[lo..hi]);
+            }
+            cursor = cursor.max(b);
+        }
+        if cursor < at + n {
+            let (lo, hi) = (cursor - at, n);
+            changed |= merge_piece(&gpu[lo..hi], &mut held[lo..hi], &mut title[lo..hi]);
         }
         if !mapped || !changed {
             return 0;
