@@ -378,10 +378,10 @@ pub(crate) static HEAP_VIEWS_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_PASSES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 /// Heap-buffer pass phase times (microseconds), plus work sizes, since the
-/// last host statistics line: scan, span merge, refresh, texture preparation,
-/// slots examined, changed slots, live buffer views, copies, and bytes.
-pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 9] =
-    [const { AtomicU64::new(0) }; 9];
+/// last host statistics line: setup, scan, span merge, refresh, texture
+/// preparation, slots examined, changed slots, live views, copies, and bytes.
+pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 10] =
+    [const { AtomicU64::new(0) }; 10];
 /// Textures brought up to date for shaders that pick them by index
 /// ([`State::heap_textures`]), the bytes of their memory, and the slots
 /// still waiting.
@@ -1460,6 +1460,7 @@ impl State {
             }
             ranges.insert(index, (shadow, address, address + len));
         }
+        let setup_us = scan_started.elapsed().as_micros() as u64;
         let scan_us = scan_started.elapsed().as_micros() as u64;
         let views = ranges.len() as u32;
         // Per host copy, the span its picked views cover.
@@ -1513,6 +1514,7 @@ impl State {
         self.heap_textures(list, heap, host);
         let texture_us = texture_started.elapsed().as_micros() as u64;
         for (i, value) in [
+            setup_us,
             scan_us,
             spans_us,
             refresh_us,
