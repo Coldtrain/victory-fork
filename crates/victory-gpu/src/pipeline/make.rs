@@ -48,7 +48,11 @@ unsafe impl Sync for Pending {}
 
 impl Pending {
     pub(crate) fn new(shaders: Vec<Arc<Shader>>, graphics: Option<Box<GraphicsState>>) -> Pending {
-        DISCOVERED.fetch_add(1, Ordering::Relaxed);
+        // Empty descriptions have no shader or host PSO to precompile;
+        // exclude them from the startup barrier's discovered total.
+        if !shaders.is_empty() {
+            DISCOVERED.fetch_add(1, Ordering::Relaxed);
+        }
         let mut key = blake3::Hasher::new();
         for s in &shaders {
             key.update(s.stage.as_bytes());
