@@ -184,8 +184,8 @@ pub(crate) fn card_stats() -> [u64; 10] {
 }
 
 /// The bytes of the hashes kept on the card for a copy of `size` bytes: 16
-/// for each 64 KiB piece (a copy that does not start on a piece boundary
-/// has one piece more).
+/// for each 16 KiB card-side piece (a copy that does not start on a piece
+/// boundary has one piece more).
 pub(crate) fn card_hash_bytes(size: u64) -> u64 {
     (size / CARD_PIECE as u64 + 2) * 16
 }
