@@ -988,11 +988,8 @@ fn workers() -> &'static Workers {
         more: std::sync::Condvar::new(),
     });
     STARTED.call_once(|| {
-        // Keep up to seven workers so the calling thread can join them
-        // for eight-way work (notably GPU copyback merging).
-        let n = std::thread::available_parallelism()
-            .map_or(4, |n| n.get().saturating_sub(1))
-            .clamp(2, 7);
+        // A modest shared pool; the submitting thread joins the work too.
+        let n = std::thread::available_parallelism().map_or(4, |n| n.get() / 4).clamp(2, 6);
         for i in 0..n {
             let _ = std::thread::Builder::new().name(format!("victory-wide-{i}")).spawn(move || {
                 let workers = WORKERS.get().expect("made above");
