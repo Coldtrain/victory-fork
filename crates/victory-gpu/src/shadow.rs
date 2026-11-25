@@ -144,19 +144,24 @@ pub(crate) fn cards() -> bool {
 /// The smallest title buffer whose copy goes to the card's memory, and the
 /// most bytes of such copies (their "before" twins not counted: a copy
 /// shaders write takes its size twice), both in bytes:
-/// `VICTORY_CARD_BUFFERS_MIN_MB` (1) and `VICTORY_CARD_BUFFERS_MB` (512). The
-/// 1 MiB floor includes medium-sized buffers too: repeated shader reads from
-/// those copies otherwise cross the bus from PC memory. The total remains
-/// bounded, and the title can restore the old 16 MiB floor with the setting.
-/// Run 69's gameplay has ten title buffers of 16 MiB or more, 494 MB, and
-/// 1,650 MB of the card's budget free.
+/// `VICTORY_CARD_BUFFERS_MIN_MB` (1) and `VICTORY_CARD_BUFFERS_MB` (512).
+/// For experiments with medium-sized buffers, `VICTORY_CARD_BUFFERS_MIN_KB`
+/// overrides the minimum in KiB (64 KiB minimum; default 1024 KiB). This
+/// lets a run test residency below 1 MiB without changing the bounded budget.
+/// The 1 MiB default includes medium-sized buffers while avoiding an
+/// unbounded increase in GPU-local allocations.
 fn card_limits() -> (u64, u64) {
     static LIMITS: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
     *LIMITS.get_or_init(|| {
         let mb = |name: &str, default: u64| {
             std::env::var(name).ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default) << 20
         };
-        (mb("VICTORY_CARD_BUFFERS_MIN_MB", 1).max(1 << 20), mb("VICTORY_CARD_BUFFERS_MB", 512))
+        let least = std::env::var("VICTORY_CARD_BUFFERS_MIN_KB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|kb| kb.saturating_mul(1 << 10).max(64 << 10))
+            .unwrap_or_else(|| mb("VICTORY_CARD_BUFFERS_MIN_MB", 1).max(1 << 20));
+        (least, mb("VICTORY_CARD_BUFFERS_MB", 512))
     })
 }
 
