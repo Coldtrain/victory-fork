@@ -3291,7 +3291,7 @@ impl Host {
             let work = CARD_WORK.lock().unwrap_or_else(|e| e.into_inner());
             work.as_ref().map(|work| (work.differs.1, (work.differs.2 / 4) as usize))
         };
-        let mut pieces: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize, u64)> = Vec::new();
+        let mut pieces: Vec<(usize, std::sync::Arc<crate::shadow::Shadow>, usize, usize, u64)> = Vec::new();
         let mut total = 0u64;
         if let Some((differs, dwords)) = differs {
             // SAFETY: the mapping of the results. The compares of these
@@ -3319,7 +3319,7 @@ impl Host {
                         }
                         let (lo, hi) = r.shadow.card_piece(&r.span, p);
                         if lo < hi && seen.insert((copy, lo, hi)) {
-                            pieces.push((r.shadow.clone(), lo, hi, total));
+                            pieces.push((copy, r.shadow.clone(), lo, hi, total));
                             total += (hi - lo) as u64;
                         }
                     }
@@ -3355,8 +3355,9 @@ impl Host {
             (|| -> windows::core::Result<u64> {
                 allocator.Reset()?;
                 list.Reset(&allocator, None)?;
-                for (shadow, lo, hi, at) in &pieces {
-                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
+                for (first, bytes) in relay_fetch_runs(&pieces) {
+                    let (_, shadow, lo, _, at) = &pieces[first];
+                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, bytes);
                 }
                 list.Close()?;
                 let lists = [Some(list.cast::<ID3D12CommandList>()?)];
@@ -3390,7 +3391,7 @@ impl Host {
         let mut title = Vec::new();
         let mut skip = Vec::new();
         let mut written = 0;
-        for (shadow, lo, hi, at) in &pieces {
+        for (_, shadow, lo, hi, at) in &pieces {
             // SAFETY: the mapping of the fetched bytes, `total` of them;
             // the copy into it has run.
             let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
@@ -3537,6 +3538,34 @@ fn card_fetch_runs(pieces: &[(usize, usize, usize, u64)]) -> Vec<(usize, u64, u6
                 last.3 += bytes;
             }
             _ => runs.push((range, from as u64, fetched_at, bytes)),
+        }
+    }
+    runs
+}
+
+/// Adjacent relay pieces from the same shadow occupy contiguous source and
+/// readback offsets. Return the first piece and combined byte count for each
+/// run; the original pieces remain intact for their individual merges.
+fn relay_fetch_runs(
+    pieces: &[(usize, Arc<crate::shadow::Shadow>, usize, usize, u64)],
+) -> Vec<(usize, u64)> {
+    let mut runs: Vec<(usize, u64)> = Vec::with_capacity(pieces.len());
+    for (index, (copy, shadow, from, to, fetched_at)) in pieces.iter().enumerate() {
+        let bytes = (to - from) as u64;
+        match runs.last_mut() {
+            Some(last) => {
+                let first = &pieces[last.0];
+                if first.0 == *copy
+                    && Arc::ptr_eq(&first.1, shadow)
+                    && first.2 as u64 + last.1 == *from as u64
+                    && first.4 + last.1 == *fetched_at
+                {
+                    last.1 += bytes;
+                    continue;
+                }
+                runs.push((index, bytes));
+            }
+            None => runs.push((index, bytes)),
         }
     }
     runs
