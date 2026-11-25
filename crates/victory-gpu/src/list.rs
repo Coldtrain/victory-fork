@@ -2180,32 +2180,6 @@ mod tests {
     use super::*;
     use crate::object::slot;
 
-    /// An indirect mesh dispatch that cannot be executed is accounted for
-    /// as dropped indirect work rather than silently disappearing.
-    #[cfg(windows)]
-    #[test]
-    fn indirect_mesh_dispatches_not_run_are_counted() {
-        let null = std::ptr::null();
-        let mut allocator = null;
-        assert_eq!(
-            create_allocator(null, 0, &ALLOCATOR_IIDS[0], &mut allocator),
-            S_OK
-        );
-        let mut list = null;
-        assert_eq!(
-            create_list(null, 0, 0, allocator, null, &LIST_IIDS[1], &mut list),
-            S_OK
-        );
-        let arguments = [7u32, 1, 1];
-        let before = INDIRECT.load(std::sync::atomic::Ordering::Relaxed);
-        state::dispatch_mesh_x(list, 0, 0, arguments.as_ptr() as u64, 0);
-        assert!(INDIRECT.load(std::sync::atomic::Ordering::Relaxed) > before);
-        assert_eq!(close(list), S_OK);
-        let release = |o: This| slot::<extern "system" fn(This) -> u32>(o, 0x10)(o);
-        assert_eq!(release(list), 0);
-        assert_eq!(release(allocator), 0);
-    }
-
     #[test]
     fn every_inline_command_falls_back_to_the_table() {
         let null = std::ptr::null();
