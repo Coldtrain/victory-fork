@@ -11,18 +11,18 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{
-        BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HDC, PAINTSTRUCT,
-        SelectObject, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
+        BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HDC, InvalidateRect,
+        PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TextOutW, TRANSPARENT, UpdateWindow,
     },
     System::LibraryLoader::GetModuleHandleW,
-    UI::WindowsAndMessaging::{
+    UI::{Input::KeyboardAndMouse::VK_RETURN, WindowsAndMessaging::{
         CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
         DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics, IDC_ARROW,
-        InvalidateRect, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
-        TranslateMessage, UpdateWindow, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
-        WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, VK_RETURN,
+        LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
+        TranslateMessage, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
+        WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
         SM_CXSCREEN, SM_CYSCREEN,
-    },
+    }},
 };
 
 const WIDTH: i32 = 960;
@@ -54,7 +54,7 @@ fn label(hdc: HDC, x: i32, y: i32, value: &str, color: u32, size: i32, bold: boo
             0, wide("Segoe UI").as_ptr(),
         );
         let old = SelectObject(hdc, font);
-        SetBkMode(hdc, TRANSPARENT);
+        SetBkMode(hdc, TRANSPARENT as i32);
         SetTextColor(hdc, color);
         TextOutW(hdc, x, y, text.as_ptr(), (text.len() - 1) as i32);
         SelectObject(hdc, old);
