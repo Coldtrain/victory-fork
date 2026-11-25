@@ -1377,6 +1377,8 @@ impl State {
             }
             ranges.insert(index, (shadow, address, address + len));
         }
+        HEAP_BUFFER_PHASES[0].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
+        phase = std::time::Instant::now();
         let views = ranges.len() as u32;
         // Per host copy, the span its picked views cover.
         let mut spans: std::collections::HashMap<usize, (std::sync::Arc<crate::shadow::Shadow>, u64, u64)> =
@@ -1388,8 +1390,6 @@ impl State {
             span.2 = span.2.max(*to);
         }
         drop(kept);
-        HEAP_BUFFER_PHASES[0].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
-        phase = std::time::Instant::now();
         let bytes: u64 = spans.values().map(|s| s.2 - s.1).sum();
         HEAP_BUFFER_PHASES[1].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
         phase = std::time::Instant::now();
