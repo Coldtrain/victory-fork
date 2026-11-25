@@ -26,6 +26,13 @@ pub fn startup_progress() -> victory_gpu::pipeline::StartupProgress {
     victory_gpu::pipeline::startup_progress()
 }
 
+/// Let the title present its first frame without waiting for the initial
+/// pipeline batch. Already queued compilation continues in the background.
+#[cfg(windows)]
+pub fn bypass_startup_wait() {
+    victory_gpu::pipeline::bypass_startup_wait()
+}
+
 use victory_loader::{ImportResolver, Provenance, Resolution};
 use victory_pe::ImportSymbol;
 
