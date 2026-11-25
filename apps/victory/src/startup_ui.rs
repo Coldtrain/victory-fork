@@ -15,7 +15,7 @@ use windows_sys::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{Input::KeyboardAndMouse::VK_RETURN, WindowsAndMessaging::{
         CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
-        DestroyWindow, DispatchMessageW, GetMessageW, GetSystemMetrics, IDC_ARROW,
+        DestroyWindow, DispatchMessageW, GetMessageW, IDC_ARROW,
         GetClientRect, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
         TranslateMessage, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
         WM_TIMER, WNDCLASSW, WS_CHILD, WS_VISIBLE,
