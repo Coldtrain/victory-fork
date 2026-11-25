@@ -82,23 +82,23 @@ void main(uint3 id : SV_DispatchThreadID) {
         cost = g.x * g.y * g.z * 64u;
         groups = g;
     } else {
-        // Mesh dispatches: the console's are one-dimensional.
+        // Mesh dispatches use the same three-dimensional group-count
+        // contract as DispatchMesh. Bound each dimension and the total
+        // group count before calculating the per-list work budget.
         uint3 g = src_args.Load3(src_at);
-        // Ahead of its draw, a record over the most a dispatch runs is a
-        // slot the title has not filled (the title leaves all
-        // ones there): empty, and not counted below either.
-        if (ahead && g.x > 65535u) {
+        if (ahead && any(g > 65535u)) {
             g = uint3(0, 0, 0);
         }
-        // Diagnostics, in the budget buffer's next words: the largest
-        // group count a mesh record asked for, and the groups asked in all.
+        g = min(g, uint3(65535u, 65535u, 65535u));
         uint was;
         budget.InterlockedMax(4, g.x, was);
         budget.InterlockedAdd(8, min(g.x, 1u << 24), was);
-        // The title's mesh shaders use only the x group ID. The
-        // console dispatch contract is one-dimensional, so normalize y/z
-        // rather than letting zero or garbage values suppress the batch.
-        g = uint3(min(g.x, 65535u), 1u, 1u);
+        uint xy = g.x * g.y;
+        if (g.z != 0 && xy > GROUPS / g.z) {
+            g = uint3(0, 0, 0);
+        } else if (xy * g.z > GROUPS) {
+            g = uint3(0, 0, 0);
+        }
         cost = g.x * g.y * g.z * 128u;
         groups = g;
     }
