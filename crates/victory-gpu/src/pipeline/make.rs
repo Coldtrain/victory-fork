@@ -28,14 +28,16 @@ pub(crate) static DISCOVERED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static COMPLETED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FAILED: AtomicU64 = AtomicU64::new(0);
 
-// Every pipeline description created during title initialization. The first
-// present snapshots this list and queues the entire startup batch, rather than
-// only pipelines remembered by the cross-run cache.
-static STARTUP: Mutex<Vec<std::sync::Weak<Pending>>> = Mutex::new(Vec::new());
+// Every pipeline description created during title initialization. Keep
+// strong references until the first present queues the batch: the title may
+// release its pipeline objects before then, but DISCOVERED still counts them.
+// Weak references let those descriptions disappear and leave the startup
+// barrier waiting forever for completions that can no longer be queued.
+static STARTUP: Mutex<Vec<Arc<Pending>>> = Mutex::new(Vec::new());
 
 pub(crate) fn discover(p: &Arc<Pending>) {
     if !p.shaders.is_empty() {
-        STARTUP.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(p));
+        STARTUP.lock().unwrap_or_else(|e| e.into_inner()).push(p.clone());
     }
 }
 
@@ -43,7 +45,7 @@ pub(crate) fn discover(p: &Arc<Pending>) {
 pub(crate) fn precompile_startup_batch() -> u64 {
     let pending = {
         let mut startup = STARTUP.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut *startup).into_iter().filter_map(|p| p.upgrade()).collect::<Vec<_>>()
+        std::mem::take(&mut *startup)
     };
     let count = pending.len() as u64;
     for p in pending {
