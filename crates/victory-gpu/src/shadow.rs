@@ -16,7 +16,7 @@
 //! indexed heaps keep what their first use copied.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
@@ -27,6 +27,8 @@ use crate::watch::PAGE;
 /// A title buffer's host copy.
 pub(crate) struct Shadow {
     pub(crate) buffer: ID3D12Resource,
+    /// D3D12 state after the last submitted list using this copy.
+    pub(crate) state: AtomicU32,
     data: *mut u8,
     gpu: u64,
     /// Where the title buffer starts and how long it is.
@@ -1691,6 +1693,7 @@ impl Shadow {
         LIVE[1].fetch_add(len, Ordering::Relaxed);
         Shadow {
             buffer,
+            state: AtomicU32::new(0),
             data,
             gpu,
             start,
