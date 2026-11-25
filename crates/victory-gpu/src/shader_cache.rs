@@ -82,6 +82,11 @@ fn build() -> &'static [u8; 32] {
         let mut bytes = victory_shader::emit::translator_fingerprint()
             .as_bytes()
             .to_vec();
+        // Keep the cache schema and adapter contract versioned independently
+        // of the translator. Bump this if host-shader encoding or the
+        // victory-gpu translation adapter changes incompatibly.
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&CACHE_TRANSLATION_VERSION.to_le_bytes());
         let limit = victory_shader::emit::loop_limit();
         if limit != victory_shader::emit::DEFAULT_LOOP_LIMIT {
             tracing::warn!(
@@ -177,6 +182,7 @@ fn cached(
 }
 
 const MAGIC: &[u8; 4] = b"VSH1";
+const CACHE_TRANSLATION_VERSION: u32 = 1;
 const STAGES: [HwStage; 8] = [
     HwStage::Ls,
     HwStage::Hs,
