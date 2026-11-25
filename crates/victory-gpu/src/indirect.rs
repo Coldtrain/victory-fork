@@ -1003,6 +1003,52 @@ void main() {
     /// they are and are charged, the slots of all ones come out empty and
     /// charge nothing; clamped as single records the same slots are clamped
     /// to the most and spend the budget.
+    /// A one-dimensional dispatch beyond 65,535 groups is emitted as two
+    /// bounded records; unwritten and over-limit arguments remain safe.
+    #[test]
+    fn warp_large_dispatch_is_made_in_parts() {
+        let Some(mut warp) = WarpHarness::new() else {
+            return;
+        };
+        let cases: [([u32; 3], [u32; 6]); 6] = [
+            ([115_200, 1, 1], [65_535, 1, 1, 49_665, 1, 1]),
+            ([65_535, 1, 1], [65_535, 1, 1, 0, 1, 1]),
+            ([65_536, 1, 1], [65_535, 1, 1, 1, 1, 1]),
+            ([5, 3, 2], [5, 3, 2, 0, 3, 2]),
+            ([0, 1, 1], [0, 1, 1, 0, 1, 1]),
+            ([200_000, 1, 1], [65_535, 1, 1, 0, 1, 1]),
+        ];
+        for (asked, parts) in cases {
+            let (src_buf, src_ptr, _) = warp.shared_buffer(16);
+            let (_budget_buf, budget_ptr, budget_gpu) = warp.shared_buffer(256);
+            let (readback_buf, readback_ptr, _) = warp.shared_buffer(64);
+            let dst_buf = warp.default_uav(64);
+            // SAFETY: mapped buffers of these sizes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(asked.as_ptr().cast(), src_ptr, 12);
+                std::ptr::write_bytes(budget_ptr, 0, 256);
+                std::ptr::write_bytes(readback_ptr, 0, 64);
+            }
+            assert!(record_clamp_as(
+                &warp.clamp,
+                &warp.list,
+                &dst_buf,
+                budget_gpu,
+                (&src_buf, 0),
+                None,
+                (2, 12, 1),
+                IN_PARTS,
+            ));
+            done_on(&warp.list, &dst_buf);
+            // SAFETY: an open list and live buffers.
+            unsafe { warp.list.CopyBufferRegion(&readback_buf, 0, &dst_buf, 0, 24) };
+            warp.submit_and_wait();
+            // SAFETY: the mapping holds 24 bytes the copy wrote.
+            let made: [u32; 6] = unsafe { readback_ptr.cast::<[u32; 6]>().read_volatile() };
+            assert_eq!(made, parts, "{asked:?}");
+        }
+    }
+
     #[test]
     fn warp_window_leaves_unfilled_slots_empty_and_uncharged() {
         let Some(mut warp) = WarpHarness::new() else {
