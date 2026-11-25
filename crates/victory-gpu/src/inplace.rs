@@ -366,6 +366,39 @@ pub(crate) fn pages_of(page: usize) -> Vec<usize> {
     v.pages.get(&(section, offset + within as u64)).cloned().unwrap_or_default()
 }
 
+/// The title views showing physical bytes `[offset, offset + len)` of a
+/// section, coalesced into address-contiguous ranges.
+pub(crate) fn views_of_section(section: usize, offset: u64, len: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let v = views();
+    let end = offset.saturating_add(len as u64);
+    let mut pages = Vec::new();
+    let mut at = offset - offset % K64 as u64;
+    while at < end {
+        if let Some(shown) = v.pages.get(&(section, at))
+            && shown.len() <= crate::watch::MANY_VIEWS
+        {
+            pages.extend(shown.iter().copied());
+        }
+        match at.checked_add(K64 as u64) {
+            Some(next) => at = next,
+            None => break,
+        }
+    }
+    pages.sort_unstable();
+    pages.dedup();
+    let mut runs: Vec<(usize, usize)> = Vec::with_capacity(pages.len());
+    for page in pages {
+        match runs.last_mut() {
+            Some((first, bytes)) if *first + *bytes == page => *bytes += K64,
+            _ => runs.push((page, K64)),
+        }
+    }
+    runs
+}
+
 /// How the views cover `[at, at + len)`.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Cover {
