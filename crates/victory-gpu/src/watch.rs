@@ -25,6 +25,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A read of a page whose newest contents live on the GPU is handed to the
+/// host's readback worker. The callback must enqueue the faulting address,
+/// wait for completion, and return true only when the faulting access can
+/// safely be retried. It must not issue D3D12 work from the exception thread.
+static GPU_READ_FAULT: AtomicUsize = AtomicUsize::new(0);
+
+/// Installs the host's demand-readback rendezvous in the vectored handler.
+/// The callback is a process-lifetime function and is called only for read
+/// access violations; unrelated faults continue to the next handler.
+pub(crate) fn gpu_read_fault_handler(handler: fn(usize) -> bool) {
+    GPU_READ_FAULT.store(handler as usize, Ordering::Release);
+    install();
+}
 
 /// The unit tracked and copied: 64 KiB, the console's page (the kernel's
 /// 4 KiB pages fold into it). Finer units made the checks of the world's
@@ -796,14 +811,28 @@ fn install() {
     unsafe extern "system" fn on_write(info: *mut EXCEPTION_POINTERS) -> i32 {
         // SAFETY: the system passes the exception being dispatched.
         let r = unsafe { &*(*info).ExceptionRecord };
-        const WRITE: usize = 1;
-        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS
-            || r.NumberParameters < 2
-            || r.ExceptionInformation[0] != WRITE
-        {
+        if r.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS || r.NumberParameters < 2 {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+        let access = r.ExceptionInformation[0];
         let at = r.ExceptionInformation[1];
+        const READ: usize = 0;
+        const WRITE: usize = 1;
+        if access == READ {
+            let callback = GPU_READ_FAULT.load(Ordering::Acquire);
+            if callback != 0 {
+                // SAFETY: the only stored value is a process-lifetime
+                // function pointer installed by `gpu_read_fault_handler`.
+                let callback: fn(usize) -> bool = unsafe { std::mem::transmute(callback) };
+                if callback(at) {
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+            }
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        if access != WRITE {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
         // Held across both checks: another thread may have opened the block
         // since this one faulted, and a copy may have guarded it again since
         // (then it is ours again, not read-only for some other reason).

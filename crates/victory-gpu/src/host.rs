@@ -648,6 +648,78 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn adjacent_card_fetch_pieces_share_one_copy_command() {
+        let pieces = [
+            (0, 0, 1 << 16, 0),
+            (0, 1 << 16, 2 << 16, 1 << 16),
+            (0, 3 << 16, 4 << 16, 2 << 16),
+            (1, 0, 1 << 16, 3 << 16),
+            (1, 1 << 16, 2 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::Host::card_fetch_runs(&pieces),
+            [
+                (0, 0, 0, 2 << 16),
+                (0, 3 << 16, 2 << 16, 1 << 16),
+                (1, 0, 3 << 16, 2 << 16),
+            ]
+        );
+    }
+
+    #[test]
+    fn card_fetch_runs_do_not_join_source_or_destination_gaps() {
+        let pieces = [
+            (0, 0, 1 << 16, 0),
+            (0, 2 << 16, 3 << 16, 1 << 16),
+            (0, 3 << 16, 4 << 16, 3 << 16),
+            (1, 4 << 16, 5 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::Host::card_fetch_runs(&pieces),
+            [
+                (0, 0, 0, 1 << 16),
+                (0, 2 << 16, 1 << 16, 1 << 16),
+                (0, 3 << 16, 3 << 16, 1 << 16),
+                (1, 4 << 16, 4 << 16, 1 << 16),
+            ]
+        );
+    }
+
+    #[test]
+    fn adjacent_relay_fetch_pieces_share_one_copy_command() {
+        let pieces = [
+            (10, 0, 1 << 16, 0),
+            (10, 1 << 16, 2 << 16, 1 << 16),
+            (10, 3 << 16, 4 << 16, 2 << 16),
+            (20, 0, 1 << 16, 3 << 16),
+            (20, 1 << 16, 2 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::Host::relay_fetch_runs(&pieces),
+            [(0, 2 << 16), (2, 1 << 16), (3, 2 << 16)]
+        );
+    }
+
+    #[test]
+    fn relay_fetch_runs_do_not_join_gaps_or_distinct_copies() {
+        let pieces = [
+            (10, 0, 1 << 16, 0),
+            (10, 2 << 16, 3 << 16, 1 << 16),
+            (10, 3 << 16, 4 << 16, 3 << 16),
+            (20, 4 << 16, 5 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::relay_fetch_runs(&pieces),
+            [
+                (0, 1 << 16),
+                (1, 1 << 16),
+                (2, 1 << 16),
+                (3, 1 << 16),
+            ]
+        );
+    }
+
+    #[test]
     fn sparse_copies_preserve_islands_and_observe_remaps() {
         use windows_sys::Win32::System::Memory::*;
         const N: usize = 5 << 16;
@@ -3253,7 +3325,7 @@ impl Host {
             let work = CARD_WORK.lock().unwrap_or_else(|e| e.into_inner());
             work.as_ref().map(|work| (work.differs.1, (work.differs.2 / 4) as usize))
         };
-        let mut pieces: Vec<(std::sync::Arc<crate::shadow::Shadow>, usize, usize, u64)> = Vec::new();
+        let mut pieces: Vec<(usize, std::sync::Arc<crate::shadow::Shadow>, usize, usize, u64)> = Vec::new();
         let mut total = 0u64;
         if let Some((differs, dwords)) = differs {
             // SAFETY: the mapping of the results. The compares of these
@@ -3281,7 +3353,7 @@ impl Host {
                         }
                         let (lo, hi) = r.shadow.card_piece(&r.span, p);
                         if lo < hi && seen.insert((copy, lo, hi)) {
-                            pieces.push((r.shadow.clone(), lo, hi, total));
+                            pieces.push((copy, r.shadow.clone(), lo, hi, total));
                             total += (hi - lo) as u64;
                         }
                     }
@@ -3317,8 +3389,13 @@ impl Host {
             (|| -> windows::core::Result<u64> {
                 allocator.Reset()?;
                 list.Reset(&allocator, None)?;
-                for (shadow, lo, hi, at) in &pieces {
-                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, (*hi - *lo) as u64);
+                let fetch_keys: Vec<_> = pieces
+                    .iter()
+                    .map(|(copy, _, lo, hi, at)| (*copy, *lo, *hi, *at))
+                    .collect();
+                for (first, bytes) in Self::relay_fetch_runs(&fetch_keys) {
+                    let (_, shadow, lo, _, at) = &pieces[first];
+                    list.CopyBufferRegion(&buffer, *at, &shadow.buffer, *lo as u64, bytes);
                 }
                 list.Close()?;
                 let lists = [Some(list.cast::<ID3D12CommandList>()?)];
@@ -3352,7 +3429,7 @@ impl Host {
         let mut title = Vec::new();
         let mut skip = Vec::new();
         let mut written = 0;
-        for (shadow, lo, hi, at) in &pieces {
+        for (_, shadow, lo, hi, at) in &pieces {
             // SAFETY: the mapping of the fetched bytes, `total` of them;
             // the copy into it has run.
             let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
@@ -3483,6 +3560,52 @@ impl Host {
         LINE_LANDED.notify_all();
     }
 
+/// Adjacent pieces from the same title-buffer range occupy contiguous source
+/// and readback offsets. One D3D12 copy command can transfer the whole run;
+/// keep the per-piece records separately for the later byte-accurate merge.
+fn card_fetch_runs(pieces: &[(usize, usize, usize, u64)]) -> Vec<(usize, u64, u64, u64)> {
+    let mut runs: Vec<(usize, u64, u64, u64)> = Vec::with_capacity(pieces.len());
+    for &(range, from, to, fetched_at) in pieces {
+        let bytes = (to - from) as u64;
+        match runs.last_mut() {
+            Some(last)
+                if last.0 == range
+                    && last.1 + last.3 == from as u64
+                    && last.2 + last.3 == fetched_at =>
+            {
+                last.3 += bytes;
+            }
+            _ => runs.push((range, from as u64, fetched_at, bytes)),
+        }
+    }
+    runs
+}
+
+/// Adjacent relay pieces from the same shadow occupy contiguous source and
+/// readback offsets. Return the first piece and combined byte count for each
+/// run; the original pieces remain intact for their individual merges.
+fn relay_fetch_runs(pieces: &[(usize, usize, usize, u64)]) -> Vec<(usize, u64)> {
+    let mut runs: Vec<(usize, u64)> = Vec::with_capacity(pieces.len());
+    for (index, &(copy, from, to, fetched_at)) in pieces.iter().enumerate() {
+        let bytes = (to - from) as u64;
+        match runs.last_mut() {
+            Some(last) => {
+                let first = pieces[last.0];
+                if first.0 == copy
+                    && first.1 as u64 + last.1 == from as u64
+                    && first.3 + last.1 == fetched_at
+                {
+                    last.1 += bytes;
+                    continue;
+                }
+                runs.push((index, bytes));
+            }
+            None => runs.push((index, bytes)),
+        }
+    }
+    runs
+}
+
     /// After a submission ran, for copies in the card's memory: the pieces
     /// of the declared ranges that the compare found differing (all of a
     /// range it did not compare) are fetched, with one more wait for the
@@ -3540,8 +3663,12 @@ impl Host {
                 (|| -> windows::core::Result<()> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
-                    for &(i, lo, hi, at) in &pieces {
-                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
+                    // The compare flags 64 KiB pieces, but adjacent pieces
+                    // in one declared range are contiguous in both resources.
+                    // Batch those copies without changing the per-piece merge
+                    // records below.
+                    for (i, lo, at, bytes) in Self::card_fetch_runs(&pieces) {
+                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo, bytes);
                     }
                     list.Close()?;
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
