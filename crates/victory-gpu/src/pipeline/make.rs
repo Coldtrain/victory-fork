@@ -7,13 +7,12 @@
 //! title's GPU watchdog ended the run (decision 0007, "Pipelines made off
 //! the title's threads").
 //!
-//! A first use queues the pipeline and waits for it within a budget per
-//! frame, so the cheap ones (menus, one-off passes such as a colour-grading
-//! bake) are there at once as before; past the budget a draw or dispatch
-//! whose pipeline is not ready is dropped, as an untranslated one is.
-//!
-//! The default budget is half a second per title frame. A pass the title
-//! runs only once and whose pipeline takes longer is lost.
+//! A first use queues the pipeline and returns immediately by default.
+//! Until the worker makes it, that draw or dispatch is skipped for this
+//! submission; later uses pick it up as soon as it is ready. This keeps
+//! driver compilation off the title's recording threads and prevents a
+//! missing pipeline from stalling the frame. Set VICTORY_PIPELINE_WAIT_MS
+//! to a positive value to opt into a bounded per-frame wait.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -101,7 +100,7 @@ fn wait_budget() -> Duration {
         let millis = std::env::var("VICTORY_PIPELINE_WAIT_MS")
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(500);
+            .unwrap_or(0);
         tracing::info!(millis, "host pipeline wait budget per frame");
         Duration::from_millis(millis)
     })
