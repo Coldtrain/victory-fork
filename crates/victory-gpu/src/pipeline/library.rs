@@ -1,5 +1,6 @@
-//! Compiled host pipelines kept on disk, and the title pipelines worth
-//! starting early (decision 0007, "Pipeline cache").
+//! Compiled host pipelines kept on disk, and title pipeline descriptions
+//! captured for creation-time precompilation on the next launch (decision
+//! 0007, "Pipeline cache").
 //!
 //! 1. Every host pipeline goes into the host's pipeline library, named by
 //!    a hash of all that its host description holds (the translated
