@@ -25,19 +25,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 /// A read of a page whose newest contents live on the GPU is handed to the
 /// host's readback worker. The callback must enqueue the faulting address,
 /// wait for completion, and return true only when the faulting access can
 /// safely be retried. It must not issue D3D12 work from the exception thread.
-static GPU_READ_FAULT: AtomicUsize = AtomicUsize::new(0);
+static GPU_READ_FAULT: OnceLock<fn(usize) -> bool> = OnceLock::new();
 
 /// Installs the host's demand-readback rendezvous in the vectored handler.
 /// The callback is a process-lifetime function and is called only for read
 /// access violations; unrelated faults continue to the next handler.
 pub(crate) fn gpu_read_fault_handler(handler: fn(usize) -> bool) {
-    GPU_READ_FAULT.store(handler as usize, Ordering::Release);
+    let _ = GPU_READ_FAULT.set(handler);
     install();
 }
 
@@ -819,14 +819,10 @@ fn install() {
         const READ: usize = 0;
         const WRITE: usize = 1;
         if access == READ {
-            let callback = GPU_READ_FAULT.load(Ordering::Acquire);
-            if callback != 0 {
-                // SAFETY: the only stored value is a process-lifetime
-                // function pointer installed by `gpu_read_fault_handler`.
-                let callback: fn(usize) -> bool = unsafe { std::mem::transmute(callback) };
-                if callback(at) {
-                    return EXCEPTION_CONTINUE_EXECUTION;
-                }
+            if let Some(callback) = GPU_READ_FAULT.get()
+                && callback(at)
+            {
+                return EXCEPTION_CONTINUE_EXECUTION;
             }
             return EXCEPTION_CONTINUE_SEARCH;
         }
