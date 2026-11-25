@@ -5800,6 +5800,13 @@ impl Meter {
         let indirect = crate::list::take_indirect() as f64 / frames;
         let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
         let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
+        let (direct_mesh, indirect_mesh, graphics_draws) = crate::draw::take_render_counts();
+        tracing::info!(
+            "native mesh rendering per frame: {direct:.1} direct DispatchMesh calls, {indirect:.1} indirect ExecuteIndirect mesh submissions, {graphics:.1} traditional graphics draw submissions",
+            direct = direct_mesh as f64 / frames,
+            indirect = indirect_mesh as f64 / frames,
+            graphics = graphics_draws as f64 / frames
+        );
         tracing::info!(
             "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame"
         );
