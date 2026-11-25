@@ -90,7 +90,55 @@ impl Default for GraphicsState {
 }
 
 impl GraphicsState {
-    /// Takes in one subobject of a stream: its type, then its data at +4
+    /// Copies the graphics state of the plain D3D12 graphics description.
+    ///
+    /// Unlike a stream, this description owns no state after the creation
+    /// call, so input semantic names and elements must be copied here.
+    pub(crate) fn from_desc(desc: &D3D12_GRAPHICS_PIPELINE_STATE_DESC) -> Self {
+        let mut state = Self::default();
+        state.blend = desc.BlendState;
+        state.sample_mask = desc.SampleMask;
+        state.rasterizer = desc.RasterizerState;
+        state.depth = desc.DepthStencilState;
+        state.strip_cut = desc.IBStripCutValue;
+        state.topology = desc.PrimitiveTopologyType;
+        state.targets.NumRenderTargets = desc.NumRenderTargets;
+        for (dst, src) in state.targets.RTFormats.iter_mut().zip(desc.RTVFormats) {
+            dst.0 = crate::resource::target_format(crate::resource::pc_format(src.0 as u32)) as i32;
+        }
+        state.depth_format =
+            DXGI_FORMAT(crate::resource::pc_format(desc.DSVFormat.0 as u32) as i32);
+        state.samples = desc.SampleDesc;
+
+        let layout = desc.InputLayout;
+        if !layout.pInputElementDescs.is_null() && layout.NumElements != 0 {
+            // SAFETY: the caller's pipeline description supplies this many
+            // input elements for the duration of CreateGraphicsPipelineState.
+            let elements = unsafe {
+                std::slice::from_raw_parts(layout.pInputElementDescs, layout.NumElements as usize)
+            };
+            state.names = elements
+                .iter()
+                .map(|e| {
+                    // SAFETY: D3D12 input elements require a valid
+                    // null-terminated semantic name.
+                    unsafe { CStr::from_ptr(e.SemanticName.0.cast()) }.to_owned()
+                })
+                .collect();
+            state.inputs = elements
+                .iter()
+                .zip(&state.names)
+                .map(|(e, name)| D3D12_INPUT_ELEMENT_DESC {
+                    SemanticName: PCSTR(name.as_ptr().cast()),
+                    Format: DXGI_FORMAT(crate::resource::pc_format(e.Format.0 as u32) as i32),
+                    ..*e
+                })
+                .collect();
+        }
+        state
+    }
+
+    /// Takes in one subobject of a stream: its type, then its data at +4: its type, then its data at +4
     /// (+8 for those holding pointers).
     ///
     /// # Safety
