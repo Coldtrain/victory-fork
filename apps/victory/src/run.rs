@@ -168,6 +168,7 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
             }
         });
 
+    let precompile_disabled = std::env::var_os("VICTORY_PIPELINE_PRECOMPILE").is_some_and(|v| v == "0");
     let mut last_discovered = 0;
     let mut last_change = Instant::now();
     let mut first_paint = true;
@@ -186,11 +187,11 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
             last_discovered = p.discovered;
             last_change = Instant::now();
         }
-        let settled = p.discovery_complete
+        let settled = precompile_disabled || (p.discovery_complete
             && p.completed >= p.discovered
             && p.failed == 0
             && p.queued == 0
-            && last_change.elapsed() >= Duration::from_secs(5);
+            && last_change.elapsed() >= Duration::from_secs(5));
 
         let ratio = if p.discovered == 0 {
             0.0
@@ -218,7 +219,7 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
             p.shaders_translated,
             p.library_loaded,
             p.library_compiled,
-            if p.discovery_complete { "first-frame gate active; waiting for initial pipeline batch" } else { "discovering title pipelines" },
+            if p.failed > 0 { "pipeline failures detected; press Enter to bypass" } else if precompile_disabled { "precompilation disabled by environment" } else if p.discovery_complete { "first-frame gate active; waiting for initial pipeline batch" } else { "discovering title pipelines" },
         );
         if settled {
             eprintln!("\nStartup pipeline batch compiled. Continuing.");
