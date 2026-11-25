@@ -377,6 +377,11 @@ pub(crate) static HEAP_VIEWS_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// index ([`State::heap_buffers`]), and the microseconds they took.
 pub(crate) static HEAP_BUFFER_PASSES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
+/// Heap-buffer pass phase times (microseconds), plus work sizes, since the
+/// last host statistics line: scan, span merge, refresh, texture preparation,
+/// slots examined, changed slots, live buffer views, copies, and bytes.
+pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 9] =
+    [const { AtomicU64::new(0) }; 9];
 /// Textures brought up to date for shaders that pick them by index
 /// ([`State::heap_textures`]), the bytes of their memory, and the slots
 /// still waiting.
@@ -1415,10 +1420,12 @@ impl State {
             changed
         };
         *passes += 1;
+        let changed_slots = changed.len() as u64;
         // Whether the device was there before the pass: a view that removes
         // it is named below.
         static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let mut alive = !GONE.load(Ordering::Relaxed) && crate::descriptor::host::device_removed().is_none();
+        let scan_started = std::time::Instant::now();
         for (n, &index) in slots.iter().enumerate() {
             ranges.remove(&index);
             let Some(handle) = heap.handle(index) else {
@@ -1453,8 +1460,10 @@ impl State {
             }
             ranges.insert(index, (shadow, address, address + len));
         }
+        let scan_us = scan_started.elapsed().as_micros() as u64;
         let views = ranges.len() as u32;
         // Per host copy, the span its picked views cover.
+        let spans_started = std::time::Instant::now();
         let mut spans: std::collections::HashMap<usize, (std::sync::Arc<crate::shadow::Shadow>, u64, u64)> =
             std::collections::HashMap::new();
         for (shadow, from, to) in ranges.values() {
@@ -1464,7 +1473,9 @@ impl State {
             span.2 = span.2.max(*to);
         }
         drop(kept);
+        let spans_us = spans_started.elapsed().as_micros() as u64;
         let bytes: u64 = spans.values().map(|s| s.2 - s.1).sum();
+        let refresh_started = std::time::Instant::now();
         // Memory that is not write-watched is copied whole by every refresh.
         // It was once refreshed only every 120 frames (unmapped pages read
         // one by one cost 14 GB a frame in run 11, before they were
@@ -1497,7 +1508,23 @@ impl State {
             }
             shadow.refresh(list, *from, to - from);
         }
+        let refresh_us = refresh_started.elapsed().as_micros() as u64;
+        let texture_started = std::time::Instant::now();
         self.heap_textures(list, heap, host);
+        let texture_us = texture_started.elapsed().as_micros() as u64;
+        for (i, value) in [
+            scan_us,
+            spans_us,
+            refresh_us,
+            texture_us,
+            slots.len() as u64,
+            changed_slots,
+            u64::from(views),
+            spans.len() as u64,
+            bytes,
+        ].into_iter().enumerate() {
+            HEAP_BUFFER_PHASES[i].fetch_add(value, Ordering::Relaxed);
+        }
         HEAP_BUFFER_PASSES.fetch_add(1, Ordering::Relaxed);
         HEAP_BUFFER_MICROS.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         static LOGGED: AtomicU64 = AtomicU64::new(0);
