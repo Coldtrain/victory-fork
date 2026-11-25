@@ -7,11 +7,13 @@
 //! title's GPU watchdog ended the run (decision 0007, "Pipelines made off
 //! the title's threads").
 //!
-//! A first use queues the pipeline on a worker. Ordinary graphics and
-//! compute work may use the bounded per-frame wait; if the pipeline is not
-//! ready, that individual submission is skipped. Mesh pipelines are different:
-//! their one-shot dispatches cannot be replayed, so first use waits for the
-//! worker to finish (or refuse) the mesh PSO instead of losing the geometry.
+//! Pipeline creation queues the host PSO on a worker immediately. This is
+//! creation-time precompilation: the title's description is captured before
+//! the first draw, and the compiled result is persisted for later launches.
+//! Ordinary graphics and compute work may use the bounded per-frame wait;
+//! if the pipeline is not ready, that individual submission is skipped.
+//! Mesh pipelines are different: their one-shot dispatches cannot be replayed,
+//! so first use waits for the worker to finish (or refuse) the mesh PSO.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
