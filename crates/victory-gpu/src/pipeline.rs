@@ -731,6 +731,7 @@ pub(crate) fn library_removal_note() -> String {
 pub struct StartupProgress {
     pub discovered: u64,
     pub completed: u64,
+    pub failed: u64,
     pub queued: u64,
     pub library_loaded: u64,
     pub library_compiled: u64,
@@ -790,8 +791,9 @@ pub(crate) fn startup_wait_before_present() {
             quiet_since = Instant::now();
         }
         let completed = make::COMPLETED.load(Ordering::Acquire);
+        let failed = make::FAILED.load(Ordering::Acquire);
         let queued = make::waiting();
-        if completed >= discovered && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
+        if completed >= discovered && failed == 0 && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
             tracing::info!(discovered, completed, "initial pipeline batch compiled before first present");
             return;
         }
@@ -806,6 +808,7 @@ pub fn startup_progress() -> StartupProgress {
     StartupProgress {
         discovered: make::DISCOVERED.load(std::sync::atomic::Ordering::Relaxed),
         completed: make::COMPLETED.load(std::sync::atomic::Ordering::Relaxed),
+        failed: make::FAILED.load(std::sync::atomic::Ordering::Relaxed),
         queued: make::waiting(),
         library_loaded: library::LOADED.load(std::sync::atomic::Ordering::Relaxed),
         library_compiled: library::MADE.load(std::sync::atomic::Ordering::Relaxed),
