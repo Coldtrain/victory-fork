@@ -20,6 +20,12 @@ pub use host::HostPolicy;
 pub use registry::{HleExport, HleModule, registry};
 pub use victory_gpu::console;
 
+/// Native handle of the main game window for the in-window startup overlay.
+#[cfg(windows)]
+pub fn startup_parent_window() -> Option<usize> {
+    victory_gpu::pipeline::startup_parent_window()
+}
+
 /// Current shader translation and host pipeline preparation progress.
 #[cfg(windows)]
 pub fn startup_progress() -> victory_gpu::pipeline::StartupProgress {
