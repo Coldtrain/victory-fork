@@ -726,6 +726,8 @@ pub(crate) struct HostList {
     /// list names alive until it is reset, even if the title releases the
     /// resource first.
     states: Mutex<States>,
+    /// States of persistent host copies of title buffers (the shadow buffers).
+    buffer_states: Mutex<BufferStates>,
     /// What the list does with depth textures that have a colour twin, by
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
@@ -778,6 +780,18 @@ type States = std::collections::HashMap<
     usize,
     (u32, u32, std::sync::Arc<crate::resource::HostTexture>),
 >;
+
+type BufferStates =
+    std::collections::HashMap<usize, (u32, u32, std::sync::Arc<crate::shadow::Shadow>)>;
+
+pub(crate) const BUFFER_VERTEX: u32 = 0x1;
+pub(crate) const BUFFER_INDEX: u32 = 0x2;
+pub(crate) const BUFFER_SHADER_RESOURCE: u32 = 0x40 | 0x80;
+pub(crate) const BUFFER_UNORDERED_ACCESS: u32 = 0x8;
+pub(crate) const BUFFER_INDIRECT_ARGUMENT: u32 = 0x200;
+
+const BUFFER_READ_STATES: u32 =
+    BUFFER_VERTEX | BUFFER_INDEX | BUFFER_SHADER_RESOURCE | BUFFER_INDIRECT_ARGUMENT;
 
 /// What a list does with a depth texture that has a colour twin
 /// ([`crate::resource::Twin`]). Lists are recorded on many threads and run
@@ -2825,6 +2839,7 @@ impl Host {
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
                 states: Mutex::default(),
+                buffer_states: Mutex::default(),
                 twins: Mutex::default(),
                 prelude,
                 pipelines: Mutex::default(),
@@ -4430,6 +4445,7 @@ impl HostList {
         self._alive.used();
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.buffer_states.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
@@ -4454,6 +4470,50 @@ impl HostList {
         }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::ResetNs, started.elapsed().as_nanos() as u64);
+    }
+
+    /// Moves a persistent title-buffer copy to `wanted` in this list.
+    /// Compatible read-only uses are combined; transitions from the state
+    /// left by an earlier use are recorded in command order.
+    pub(crate) fn buffer_state(
+        &self,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        wanted: u32,
+    ) {
+        let key = std::sync::Arc::as_ptr(shadow) as usize;
+        let next = {
+            let mut states = self.buffer_states.lock().unwrap_or_else(|e| e.into_inner());
+            match states.entry(key) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((wanted, wanted, shadow.clone()));
+                    return;
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let state = &mut o.get_mut().1;
+                    let before = *state;
+                    *state = if before != 0
+                        && wanted != 0
+                        && before & !BUFFER_READ_STATES == 0
+                        && wanted & !BUFFER_READ_STATES == 0
+                    {
+                        before | wanted
+                    } else {
+                        wanted
+                    };
+                    (before != *state).then_some((before, *state))
+                }
+            }
+        };
+        if let Some((before, after)) = next {
+            // SAFETY: this list and its shadow buffer are live.
+            unsafe {
+                self.list.ResourceBarrier(&[transition(
+                    &shadow.buffer,
+                    D3D12_RESOURCE_STATES(before as i32),
+                    D3D12_RESOURCE_STATES(after as i32),
+                )])
+            };
+        }
     }
 
     /// Moves a title texture's host copy to `wanted` (a host state) in this
@@ -4739,6 +4799,16 @@ impl HostList {
             let real = copying.get(key).copied().unwrap_or(real);
             (real != *first)
                 .then(|| transition(&copy.texture, host_state(real), host_state(*first)))
+        }));
+        // Shadow buffers persist across lists. The list that ran before this
+        // one left each copy in its recorded final state; bring it to this
+        // list's first state before the title's commands execute.
+        let buffer_states = self.buffer_states.lock().unwrap_or_else(|e| e.into_inner());
+        barriers.extend(buffer_states.values().filter_map(|(first, last, shadow)| {
+            let real = shadow.state.swap(*last, Ordering::Relaxed);
+            (real != *first).then(|| {
+                transition(&shadow.buffer, host_state(real), host_state(*first))
+            })
         }));
         if barriers.is_empty() && syncs.is_empty() {
             return None;
