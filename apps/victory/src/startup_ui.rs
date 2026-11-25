@@ -15,10 +15,10 @@ use windows_sys::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{Input::KeyboardAndMouse::VK_RETURN, WindowsAndMessaging::{
         CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
-        DestroyWindow, DispatchMessageW, GetMessageW, IDC_ARROW,
-        GetClientRect, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
+        DestroyWindow, DispatchMessageW, GetMessageW, GetWindowRect, IDC_ARROW,
+        LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SetTimer,
         TranslateMessage, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_PAINT,
-        WM_TIMER, WNDCLASSW, WS_CHILD, WS_VISIBLE,
+        WM_TIMER, WNDCLASSW, WS_POPUP, WS_VISIBLE,
     }},
 };
 
@@ -184,29 +184,32 @@ pub(super) fn run(stop: Arc<AtomicBool>) {
             ..std::mem::zeroed()
         };
         if RegisterClassW(&wc) == 0 { return; }
-        // Wait for the first host present to create the actual game window.
-        // The pipeline barrier holds that present, leaving this thread free to
-        // attach the loading UI as a child of the game window.
-        let parent = loop {
+        // Wait until the first host present has created the real game window.
+        // Use an owned popup rather than a cross-thread WS_CHILD window:
+        // Windows keeps an owned popup above its owner, clips neither window,
+        // and hides/minimizes it with the game without making it globally topmost.
+        let owner = loop {
             if STOP.get().is_some_and(|s| s.load(Ordering::Acquire)) {
                 return;
             }
-            if let Some(parent) = victory_hle::startup_parent_window() {
-                break parent as HWND;
+            if let Some(owner) = victory_hle::startup_parent_window() {
+                break owner as HWND;
             }
             std::thread::sleep(Duration::from_millis(25));
         };
-        let mut client: RECT = std::mem::zeroed();
-        GetClientRect(parent, &mut client);
-        let parent_width = client.right - client.left;
-        let parent_height = client.bottom - client.top;
-        let x = (parent_width - WIDTH) / 2;
-        let y = (parent_height - HEIGHT) / 2;
-        let width = WIDTH.min(parent_width.max(1));
-        let height = HEIGHT.min(parent_height.max(1));
+        let mut owner_rect: RECT = std::mem::zeroed();
+        if GetWindowRect(owner, &mut owner_rect) == 0 {
+            return;
+        }
+        let owner_width = owner_rect.right - owner_rect.left;
+        let owner_height = owner_rect.bottom - owner_rect.top;
+        let width = WIDTH.min(owner_width.max(1));
+        let height = HEIGHT.min(owner_height.max(1));
+        let x = owner_rect.left + (owner_width - width) / 2;
+        let y = owner_rect.top + (owner_height - height) / 2;
         let hwnd = CreateWindowExW(
-            0, class.as_ptr(), title.as_ptr(), WS_CHILD | WS_VISIBLE,
-            x.max(0), y.max(0), width, height, parent,
+            0, class.as_ptr(), title.as_ptr(), WS_POPUP | WS_VISIBLE,
+            x, y, width, height, owner,
             std::ptr::null_mut(), instance, std::ptr::null(),
         );
         if hwnd.is_null() { return; }
