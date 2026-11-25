@@ -176,7 +176,8 @@ fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) 
             break;
         }
         if continue_rx.try_recv().is_ok() {
-            eprintln!("\nStartup precompilation continues in the background.");
+            victory_hle::bypass_startup_wait();
+            eprintln!("\nStartup wait bypassed; compilation continues in the background.");
             break;
         }
 
