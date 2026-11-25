@@ -1330,7 +1330,12 @@ impl<'a> Lower<'a> {
                                 // lanes 32..63 are the other host wave: masks, lane reads and lane
                                 // numbers go through two exchange dwords past the program's LDS
                                 exchange = Some((s.lds_dwords, group <= 32, all));
-                                s.lds_dwords += 2 * group.div_ceil(64);
+                                // Two dwords per console wave exchange reductions and
+                                // masks. A bpermute additionally needs one LDS slot
+                                // per lane so a wave64 can exchange across its two
+                                // host wave32 halves.
+                                let per_wave = 2 + if insts().any(|i| i.name() == "ds_bpermute_b32") { 64 } else { 0 };
+                                s.lds_dwords += per_wave * group.div_ceil(64);
                             }
                         }
                     }
@@ -4282,11 +4287,6 @@ impl<'a> Lower<'a> {
             // host (it left through a branch, not a guard) is read as the
             // host gives it; the console reads 0.
             self.cross_lane(false)?;
-            if self.exchange.as_ref().is_some_and(|e| !e.1) {
-                // a console wave of 64 run as two host waves: the lane named
-                // may be in the other one
-                return Err("a lane permute across two host waves");
-            }
             let at = self.vgprs(inst, addr.as_ref().ok_or("a permute address")?, 1)?[0];
             let x = self.vgprs(inst, data.first().ok_or("a permute source")?, 1)?[0];
             let o = self.s.m.i32(offset);
@@ -4302,7 +4302,34 @@ impl<'a> Lower<'a> {
                 }
                 None => x,
             };
-            let r = self.read_lane(x, src);
+            let r = if let Some((slot, false, _)) = self.exchange {
+                // A wave64 bpermute may name a lane in the other host wave32.
+                // Stage each console lane's source value in group-shared memory,
+                // then read the requested lane after a full-group rendezvous.
+                if !self.all_lanes(b) {
+                    need(b);
+                    return Err("a cross-half lane permute without a full-wave rendezvous");
+                }
+                let group = self.s.threads.expect("compute").iter().product::<u32>();
+                let waves = group.div_ceil(64);
+                let scratch = slot + 2 * waves;
+                let thread = self.console_thread();
+                let wave = self.s.m.bin(c, Bin::LShr, thread, self.s.m.i32(6));
+                let wave_base = self.s.m.bin(c, Bin::Mul, wave, self.s.m.i32(64));
+                let lane = self.console_lane();
+                let index = self.s.m.bin(c, Bin::Add, self.s.m.i32(scratch), self.s.m.bin(c, Bin::Add, wave_base, lane));
+                let lds = self.s.lds();
+                let ptr = self.s.m.element(c, lds, index);
+                self.s.m.store(c, ptr, x);
+                self.group_sync(c);
+                let target = self.s.m.bin(c, Bin::Add, self.s.m.i32(scratch), self.s.m.bin(c, Bin::Add, wave_base, src));
+                let ptr = self.s.m.element(c, lds, target);
+                let value = self.s.m.load(c, ptr);
+                self.group_sync(c);
+                value
+            } else {
+                self.read_lane(x, src)
+            };
             let reg = dst_reg.ok_or("a permute result")?;
             self.write(inst, Reg::V(reg), r, guard);
             return Ok(());
