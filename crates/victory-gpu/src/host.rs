@@ -549,6 +549,13 @@ pub(crate) fn host() -> Option<&'static Host> {
     .as_ref()
 }
 
+/// The main game window, once the first swap chain has been created.
+pub(crate) fn window_handle() -> Option<usize> {
+    let host = host()?;
+    let presenter = host.presenter.lock().unwrap_or_else(|e| e.into_inner());
+    presenter.as_ref().map(|p| p.hwnd.0 as usize)
+}
+
 fn create() -> windows::core::Result<Host> {
     // SAFETY: plain D3D12 object creation with valid descriptions.
     unsafe {
@@ -5983,8 +5990,6 @@ impl Host {
     /// as frame `frame` (saved if captures are on). `None` if nothing was
     /// shown; else, in diagnostics builds, whether the frame was black.
     pub(crate) fn present(&self, texture: &ID3D12Resource, state: u32, frame: u64) -> Option<bool> {
-        // Keep the first game frame hidden until the startup pipeline batch is ready.
-        crate::pipeline::startup_wait_before_present();
         // SAFETY: a live resource.
         let desc = unsafe { texture.GetDesc() };
         let Some(format) = swap_format(desc.Format) else {
@@ -6002,6 +6007,12 @@ impl Host {
                 }
             };
         }
+        let p = presenter.as_mut()?;
+        // The real game window and swap chain must exist before the loading UI starts.
+        // The UI is a child overlay of this window, not a second top-level window.
+        drop(presenter);
+        crate::pipeline::startup_wait_before_present();
+        let mut presenter = self.presenter.lock().unwrap_or_else(|e| e.into_inner());
         let p = presenter.as_mut()?;
         if (p.width, p.height, p.format) != (width, height, format) {
             // Presents sent ahead hold back buffers until they have run.
