@@ -331,10 +331,10 @@ pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0
 pub(crate) static HEAP_TEXTURE_PHASES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 /// Fine-grained texture-pass timings: descriptor decode, mapped-page query,
 /// host descriptor mirror, staging metadata, and descriptor readability check.
-pub(crate) static HEAP_TEXTURE_DETAIL: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+pub(crate) static HEAP_TEXTURE_DETAIL: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 /// Counts since the last detailed report: due, examined, placed, unmapped,
 /// partial, mirrored, and uploaded texture slots.
-pub(crate) static HEAP_TEXTURE_COUNTS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+pub(crate) static HEAP_TEXTURE_COUNTS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 struct HeapPhaseTimer<'a> {
     counter: &'a AtomicU64,
     started: std::time::Instant,
@@ -1690,7 +1690,7 @@ impl State {
             let tabled = crate::texture::is_staged(resource);
             HEAP_TEXTURE_DETAIL[3].fetch_add(metadata_started.elapsed().as_micros() as u64, Ordering::Relaxed);
             if tabled {
-                HEAP_TEXTURE_COUNTS[6].fetch_add(1, Ordering::Relaxed);
+                HEAP_TEXTURE_COUNTS[7].fetch_add(1, Ordering::Relaxed);
             }
             if let Some(view) = &view {
                 let readable_started = std::time::Instant::now();
@@ -1708,7 +1708,9 @@ impl State {
                 crate::host::log_removal_context();
                 return;
             }
+            let staged_started = std::time::Instant::now();
             let (bytes, whole) = crate::texture::staged(resource).unwrap_or((0, true));
+            HEAP_TEXTURE_DETAIL[5].fetch_add(staged_started.elapsed().as_micros() as u64, Ordering::Relaxed);
             // Not all of it there: looked at again next frame, and from
             // then on as a slot with nothing new (a placed texture: until
             // more of it is mapped; a texture object at an address the
