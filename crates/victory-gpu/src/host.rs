@@ -726,6 +726,8 @@ pub(crate) struct HostList {
     /// list names alive until it is reset, even if the title releases the
     /// resource first.
     states: Mutex<States>,
+    /// States of persistent host copies of title buffers (the shadow buffers).
+    buffer_states: Mutex<BufferStates>,
     /// What the list does with depth textures that have a colour twin, by
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
@@ -778,6 +780,18 @@ type States = std::collections::HashMap<
     usize,
     (u32, u32, std::sync::Arc<crate::resource::HostTexture>),
 >;
+
+type BufferStates =
+    std::collections::HashMap<usize, (u32, u32, std::sync::Arc<crate::shadow::Shadow>)>;
+
+pub(crate) const BUFFER_VERTEX: u32 = 0x1;
+pub(crate) const BUFFER_INDEX: u32 = 0x2;
+pub(crate) const BUFFER_SHADER_RESOURCE: u32 = 0x40 | 0x80;
+pub(crate) const BUFFER_UNORDERED_ACCESS: u32 = 0x8;
+pub(crate) const BUFFER_INDIRECT_ARGUMENT: u32 = 0x200;
+
+const BUFFER_READ_STATES: u32 =
+    BUFFER_VERTEX | BUFFER_INDEX | BUFFER_SHADER_RESOURCE | BUFFER_INDIRECT_ARGUMENT;
 
 /// What a list does with a depth texture that has a colour twin
 /// ([`crate::resource::Twin`]). Lists are recorded on many threads and run
@@ -1489,21 +1503,15 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 "#;
 
-/// Whether the pieces hashed again after ranges were sent up to a copy in
-/// the card's memory are hashed in runs of pieces that touch, each piece
-/// once (`VICTORY_CARD_REHASH_RUNS=1`; off by default), and not in a pass
-/// per range sent up.
+/// Hash pieces touched by title-memory sends in joined runs, once per
+/// piece, rather than dispatching a separate pass for every sent range.
 ///
-/// These passes are ours, they run on the card before every submission's
-/// lists, and no timing so far names them: each walks its 64 KiB pieces
-/// 16 bytes at a time, 4,096 steps one after the other, so a pass takes
-/// the time of one piece however few its pieces are. Run 102 sent up 514
-/// ranges a frame: 514 such passes. The same pieces are hashed either way;
-/// a piece hashed when it need not be, or not hashed when it should, costs
-/// a fetch that finds nothing and loses no shader write.
+/// This is the default because the ranges frequently overlap the same
+/// 64 KiB pieces: the latest profile had 188 passes over 1,184 pieces per
+/// frame. Joining preserves the exact set of pieces hashed (see
+/// `shadow::joined_piece_runs`), while removing redundant dispatches.
 fn rehash_runs() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_REHASH_RUNS").is_some_and(|v| v == "1"))
+    true
 }
 
 /// Since the last frame-rate line, of our own passes over copies in the
@@ -1798,8 +1806,9 @@ static QUEUE_ORDER: Mutex<u64> = Mutex::new(0);
 /// Since the last frame-rate line, of the thread that lands flights
 /// ([`relay`]): landings, flights landed, microseconds it waited for the
 /// card with nothing to land, microseconds it waited for fetches of card
-/// copies' pieces, microseconds of landing in all.
-static RELAY_STATS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+/// copies' pieces, microseconds of landing in all, and CPU time merging
+/// the fetched pieces into title memory.
+static RELAY_STATS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 
 /// Of the line's things in order (a flight: the value signalled on the
 /// host's fence behind it; a write or a signal behind a flight: `None`):
@@ -2498,12 +2507,13 @@ fn late_line(frames: f64) {
         tracing::info!(
             "the relay per frame (VICTORY_RELAY=1): {:.1} flights landed in {:.1} landings by the thread that copies back, \
              beside the submitting thread; that thread waited {:.1} ms for the card with nothing to land and {:.1} ms for \
-             fetches of card copies' pieces, and was {:.1} ms landing in all (the frame line's \"copying back\" is its time; \
+             fetches of card copies' pieces, spent {:.1} ms merging fetched bytes, and was {:.1} ms landing in all (the frame line's \"copying back\" is its time; \
              \"settles\" above are waits of other threads for it)",
             r[1],
             r[0],
             r[2] / 1000.0,
             r[3] / 1000.0,
+            r[5] / 1000.0,
             r[4] / 1000.0,
         );
     }
@@ -2829,6 +2839,7 @@ impl Host {
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
                 states: Mutex::default(),
+                buffer_states: Mutex::default(),
                 twins: Mutex::default(),
                 prelude,
                 pipelines: Mutex::default(),
@@ -3337,14 +3348,17 @@ impl Host {
             CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
             CARD_STATS[6].fetch_add(us, Ordering::Relaxed);
         }
+        let merging = std::time::Instant::now();
         let mut title = Vec::new();
+        let mut skip = Vec::new();
         let mut written = 0;
         for (shadow, lo, hi, at) in &pieces {
             // SAFETY: the mapping of the fetched bytes, `total` of them;
             // the copy into it has run.
             let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
-            written += shadow.card_merge_relay(*lo, gpu, after, &mut title);
+            written += shadow.card_merge_relay(*lo, gpu, after, &mut title, &mut skip);
         }
+        RELAY_STATS[5].fetch_add(merging.elapsed().as_micros() as u64, Ordering::Relaxed);
         COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
         // Sends up to `after` are of no use to any later merge.
         crate::shadow::relay_fetched(after);
@@ -4431,6 +4445,7 @@ impl HostList {
         self._alive.used();
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.buffer_states.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.twins.lock().unwrap_or_else(|e| e.into_inner()).clear();
         self.pipelines.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
@@ -4455,6 +4470,50 @@ impl HostList {
         }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::ResetNs, started.elapsed().as_nanos() as u64);
+    }
+
+    /// Moves a persistent title-buffer copy to `wanted` in this list.
+    /// Compatible read-only uses are combined; transitions from the state
+    /// left by an earlier use are recorded in command order.
+    pub(crate) fn buffer_state(
+        &self,
+        shadow: &std::sync::Arc<crate::shadow::Shadow>,
+        wanted: u32,
+    ) {
+        let key = std::sync::Arc::as_ptr(shadow) as usize;
+        let next = {
+            let mut states = self.buffer_states.lock().unwrap_or_else(|e| e.into_inner());
+            match states.entry(key) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((wanted, wanted, shadow.clone()));
+                    return;
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let state = &mut o.get_mut().1;
+                    let before = *state;
+                    *state = if before != 0
+                        && wanted != 0
+                        && before & !BUFFER_READ_STATES == 0
+                        && wanted & !BUFFER_READ_STATES == 0
+                    {
+                        before | wanted
+                    } else {
+                        wanted
+                    };
+                    (before != *state).then_some((before, *state))
+                }
+            }
+        };
+        if let Some((before, after)) = next {
+            // SAFETY: this list and its shadow buffer are live.
+            unsafe {
+                self.list.ResourceBarrier(&[transition(
+                    &shadow.buffer,
+                    D3D12_RESOURCE_STATES(before as i32),
+                    D3D12_RESOURCE_STATES(after as i32),
+                )])
+            };
+        }
     }
 
     /// Moves a title texture's host copy to `wanted` (a host state) in this
@@ -4740,6 +4799,16 @@ impl HostList {
             let real = copying.get(key).copied().unwrap_or(real);
             (real != *first)
                 .then(|| transition(&copy.texture, host_state(real), host_state(*first)))
+        }));
+        // Shadow buffers persist across lists. The list that ran before this
+        // one left each copy in its recorded final state; bring it to this
+        // list's first state before the title's commands execute.
+        let buffer_states = self.buffer_states.lock().unwrap_or_else(|e| e.into_inner());
+        barriers.extend(buffer_states.values().filter_map(|(first, last, shadow)| {
+            let real = shadow.state.swap(*last, Ordering::Relaxed);
+            (real != *first).then(|| {
+                transition(&shadow.buffer, host_state(real), host_state(*first))
+            })
         }));
         if barriers.is_empty() && syncs.is_empty() {
             return None;
@@ -5685,9 +5754,8 @@ impl Meter {
             let [passes, pieces, compares] = [0, 1, 2].map(|i| CARD_PASSES[i].swap(0, Ordering::Relaxed) as f64 / frames);
             if passes + compares > 0.0 {
                 tracing::info!(
-                    "our passes over copies in the card's memory per frame: {passes:.0} hash passes over {pieces:.0} pieces after \
-                     ranges were sent up (VICTORY_CARD_REHASH_RUNS=1 joins them: now {}), {compares:.0} compare passes",
-                    if rehash_runs() { "on" } else { "off" }
+                    "our passes over copies in the card's memory per frame: {passes:.0} joined hash passes over {pieces:.0} pieces after \
+                     ranges were sent up, {compares:.0} compare passes"
                 );
             }
         }
@@ -5704,8 +5772,8 @@ impl Meter {
             let [through, left] = [0, 1].map(|i| crate::texture::UNLOCKED[i].swap(0, Ordering::Relaxed) as f64 / frames);
             if through + left > 0.0 {
                 tracing::info!(
-                    "texture refreshes that did not wait for title memory to hold still, per frame (VICTORY_TEXTURE_NO_WAIT=1): \
-                     {through:.1} read through the kernel, {left:.1} left for the next refresh (a page was not there)"
+                    "nonblocking texture refreshes per frame: {through:.1} read through the kernel, \
+                     {left:.1} left for the next refresh (a page was not there)"
                 );
             }
         }
@@ -5723,6 +5791,21 @@ impl Meter {
         let picked = crate::draw::HEAP_BUFFER_PASSES.swap(0, Ordering::Relaxed) as f64 / frames;
         let picked_ms =
             crate::draw::HEAP_BUFFER_MICROS.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames;
+        let heap_phases: Vec<f64> = crate::draw::HEAP_BUFFER_PHASES
+            .iter()
+            .map(|phase| phase.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames)
+            .collect();
+        if picked > 0.0 {
+            let texture_phases: Vec<f64> = crate::draw::HEAP_TEXTURE_PHASES
+                .iter()
+                .map(|phase| phase.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames)
+                .collect();
+            tracing::info!(
+                "indexed heap preparation per frame: {:.1} ms descriptor-slot mirroring, {:.1} ms span aggregation, {:.1} ms buffer refreshes, {:.1} ms indexed-texture uploads; texture pass: {:.1} ms due-queue census, {:.1} ms slot lookup/mapping, {:.1} ms mirror/classification, {:.1} ms staging/readable checks, {:.1} ms total loop",
+                heap_phases[0], heap_phases[1], heap_phases[2], heap_phases[3],
+                texture_phases[0], texture_phases[1], texture_phases[2], texture_phases[3], texture_phases[4]
+            );
+        }
         // Copies between depth textures and their colour twins, each way.
         let [twin_to_depth, twin_to_colour] =
             [2, 3].map(|i| crate::resource::TWINS[i].swap(0, Ordering::Relaxed) as f64 / frames);
@@ -5732,11 +5815,13 @@ impl Meter {
         let card = crate::shadow::card_stats();
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();
-        // Over the same frames as the counts above.
-        #[cfg(feature = "diagnostics")]
-        let drops = crate::pipeline::take_drops();
         if self.logged.elapsed() >= std::time::Duration::from_secs(5) {
             self.logged = std::time::Instant::now();
+            // Drain only when printing the detailed report. Taking this on
+            // every frame silently discarded all but the final frame's
+            // pipeline-drop reasons in each five-second reporting window.
+            #[cfg(feature = "diagnostics")]
+            let drops = crate::pipeline::take_drops();
             tracing::info!(
                 "placed texture views: {} writes of another view of the texture a slot showed (it kept the old view until the new was made)",
                 crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
@@ -5822,8 +5907,7 @@ impl Meter {
                 crate::copystat::log(std::mem::take(&mut self.copy_stats_frames) as f64);
                 for (why, n) in drops.iter().take(40) {
                     tracing::info!(
-                        "dropped {:.1}/frame without a host pipeline: {why}",
-                        *n as f64 / frames
+                        "dropped {n} times without a host pipeline since the last detailed report: {why}"
                     );
                 }
             }
@@ -5870,6 +5954,9 @@ impl Host {
     /// as frame `frame` (saved if captures are on). `None` if nothing was
     /// shown; else, in diagnostics builds, whether the frame was black.
     pub(crate) fn present(&self, texture: &ID3D12Resource, state: u32, frame: u64) -> Option<bool> {
+        // Do not expose the first game frame until the initial batch of
+        // discovered title pipelines has finished compiling.
+        crate::pipeline::startup_wait_before_present();
         // SAFETY: a live resource.
         let desc = unsafe { texture.GetDesc() };
         let Some(format) = swap_format(desc.Format) else {
@@ -6035,12 +6122,28 @@ fn title_window() -> Option<HWND> {
         // SAFETY: a window handle from the enumeration; `found` is ours.
         unsafe {
             GetWindowThreadProcessId(hwnd, Some(&mut process));
-            if process == windows::Win32::System::Threading::GetCurrentProcessId()
-                && IsWindowVisible(hwnd).as_bool()
+            if process != windows::Win32::System::Threading::GetCurrentProcessId()
+                || !IsWindowVisible(hwnd).as_bool()
             {
-                *(found.0 as *mut Option<HWND>) = Some(hwnd);
-                return false.into();
+                return true.into();
             }
+
+            // The startup progress window is a separate, temporary topmost
+            // window. It must never be selected as the DXGI swap-chain target:
+            // the title's first present happens while that window is visible,
+            // and destroying it after precompilation would leave the swap chain
+            // attached to a dead HWND.
+            let mut class_name = [0u16; 128];
+            let length = GetClassNameW(hwnd, &mut class_name);
+            if length > 0
+                && String::from_utf16_lossy(&class_name[..length as usize])
+                    == "VictoryShaderLoadingWindow"
+            {
+                return true.into();
+            }
+
+            *(found.0 as *mut Option<HWND>) = Some(hwnd);
+            return false.into();
         }
         true.into()
     }

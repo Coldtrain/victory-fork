@@ -16,7 +16,7 @@
 //! indexed heaps keep what their first use copied.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
@@ -27,6 +27,8 @@ use crate::watch::PAGE;
 /// A title buffer's host copy.
 pub(crate) struct Shadow {
     pub(crate) buffer: ID3D12Resource,
+    /// D3D12 state after the last submitted list using this copy.
+    pub(crate) state: AtomicU32,
     data: *mut u8,
     gpu: u64,
     /// Where the title buffer starts and how long it is.
@@ -935,30 +937,21 @@ unsafe fn copy_wide(src: *const u8, dst: *mut u8, len: usize) {
     });
 }
 
-/// Whether the snapshots of a submission's shader-written ranges, and the
-/// compare that finds what the shaders wrote, run on several threads
-/// across ranges (`VICTORY_WIDE_BACK=1`; off by default).
+/// Whether snapshots of shader-written ranges and the later comparison
+/// of those ranges use the persistent parallel worker pool.
 ///
-/// Both ran range by range on the submitting thread, a range on several
-/// threads only if it was 16 MiB or more. The ranges left on the CPU's side
-/// since the big buffers went to the card are small and many: in run 86,
-/// 7,024 declared ranges a frame, 375 MB of them compared after the card
-/// ran in 563 pieces of work, none of 16 MiB: 51 ms a frame of snapshots
-/// and 35 ms of comparing, one thread, bound by one core's memory speed.
+/// This is enabled unconditionally: the serial path copied and compared
+/// thousands of small ranges on the submission thread, despite the worker
+/// pool already having bounded, persistent workers and preserving the
+/// exact same byte ranges and snapshot boundaries. Snapshot collection is
+/// deferred only until the submission's refreshes have completed; the
+/// command lists are not submitted until the snapshots finish. The parallel
+/// compare likewise completes before the existing merge writes title memory.
 ///
-/// With the switch a submission's snapshots are noted as it is prepared
-/// and taken together when its refreshes are done, just before it goes to
-/// the card ([`take_snapshots`]), and the compares of everything declared
-/// run together after the card ([`find_all`]), both cut into pieces of
-/// work of about 1 MiB for a few threads that are kept ([`wide`]). The
-/// bytes taken and the bytes compared are the same ones: a range's bytes
-/// cannot change between the moment it is declared and the end of the
-/// preparing (a declared range is left alone by every refresh, the title's
-/// own copies write title memory and not the copy, and the card runs the
-/// lists only afterwards).
+/// Keep this as a code-level policy rather than a runtime tuning switch:
+/// the serial and parallel paths must have identical correctness semantics.
 pub(crate) fn wide_back() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_BACK").is_some_and(|v| v == "1"))
+    true
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -1700,6 +1693,7 @@ impl Shadow {
         LIVE[1].fetch_add(len, Ordering::Relaxed);
         Shadow {
             buffer,
+            state: AtomicU32::new(0),
             data,
             gpu,
             start,
@@ -2598,7 +2592,14 @@ impl Shadow {
     /// a copy has no other use for), as [`Shadow::merge_under_writes`].
     /// `title` is scratch memory. Returns the bytes written to title
     /// memory.
-    pub(crate) fn card_merge_relay(&self, at: usize, gpu: &[u8], fetched_after: u64, title: &mut Vec<u8>) -> usize {
+    pub(crate) fn card_merge_relay(
+        &self,
+        at: usize,
+        gpu: &[u8],
+        fetched_after: u64,
+        title: &mut Vec<u8>,
+        skip: &mut Vec<(usize, usize)>,
+    ) -> usize {
         let start = self.start as usize;
         let Some(card) = &self.card else {
             return 0;
@@ -2618,25 +2619,48 @@ impl Shadow {
         let last = last_difference(gpu, held).unwrap_or(first);
         let (at, n) = (at + first, last + 1 - first);
         let (gpu, held) = (&gpu[first..=last], &mut held[first..=last]);
-        let skip: Vec<(usize, usize)> = {
+        // Reuse the caller's scratch allocation across the fetched pieces:
+        // a frame can contain hundreds of pieces, and allocating a fresh
+        // Vec for every one adds allocator traffic to the relay hot path.
+        skip.clear();
+        {
             let dirty = card.dirty.lock().unwrap_or_else(|e| e.into_inner());
             let sent = card.sent.lock().unwrap_or_else(|e| e.into_inner());
-            dirty
-                .iter()
-                .copied()
-                .chain(sent.iter().filter(|s| s.2 > fetched_after).map(|s| (s.0, s.1)))
-                .filter(|&(a, b)| a < at + n && b > at)
-                .collect()
-        };
+            skip.extend(
+                dirty
+                    .iter()
+                    .copied()
+                    .chain(sent.iter().filter(|s| s.2 > fetched_after).map(|s| (s.0, s.1)))
+                    .filter(|&(a, b)| a < at + n && b > at),
+            );
+        }
         title.clear();
         title.resize(n, 0);
         let mapped = crate::host::read_into((start + at) as *const u8, title);
         let mut changed = false;
-        for (a, b) in outside(at, at + n, skip) {
-            let (a, b) = (a - at, b - at);
-            // Title memory that is not mapped: the CPU's side keeps what
-            // the card wrote, as before; `title` is scratch then.
-            changed |= merge_piece(&gpu[a..b], &mut held[a..b], &mut title[a..b]);
+        // Walk the excluded intervals in place. Building an additional Vec
+        // of gaps for every 64 KiB piece would retain allocator traffic even
+        // after reusing `skip` itself.
+        skip.sort_unstable();
+        let mut cursor = at;
+        for &(a, b) in skip.iter() {
+            if b <= cursor {
+                continue;
+            }
+            if a >= at + n {
+                break;
+            }
+            if a > cursor {
+                let (lo, hi) = (cursor - at, a.min(at + n) - at);
+                // Title memory that is not mapped: the CPU's side keeps
+                // what the card wrote, as before; `title` is scratch then.
+                changed |= merge_piece(&gpu[lo..hi], &mut held[lo..hi], &mut title[lo..hi]);
+            }
+            cursor = cursor.max(b);
+        }
+        if cursor < at + n {
+            let (lo, hi) = (cursor - at, n);
+            changed |= merge_piece(&gpu[lo..hi], &mut held[lo..hi], &mut title[lo..hi]);
         }
         if !mapped || !changed {
             return 0;
@@ -3150,6 +3174,52 @@ mod window_tests {
             assert!(start <= address && start + len >= end);
             assert!(start % g == 0 && len % g == 0);
         }
+    }
+}
+
+/// Verifies that persistent shadow-buffer states follow submission order.
+#[cfg(test)]
+mod buffer_state_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn buffer_states_follow_submission_order_and_combine_reads() {
+        let Some(host) = host() else { return };
+        let Some((buffer, data)) = host.shared_buffer(256) else {
+            return;
+        };
+        // SAFETY: a live buffer.
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let shadow = Arc::new(Shadow::new(buffer, data, gpu, 0, 256));
+
+        let write = host.new_list().unwrap();
+        write.buffer_state(&shadow, crate::host::BUFFER_UNORDERED_ACCESS);
+        write.close();
+        host.execute(&[&write]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_UNORDERED_ACCESS
+        );
+
+        let read = host.new_list().unwrap();
+        read.buffer_state(&shadow, crate::host::BUFFER_VERTEX);
+        read.buffer_state(&shadow, crate::host::BUFFER_SHADER_RESOURCE);
+        read.close();
+        host.execute(&[&read]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_VERTEX | crate::host::BUFFER_SHADER_RESOURCE
+        );
+
+        let next_write = host.new_list().unwrap();
+        next_write.buffer_state(&shadow, crate::host::BUFFER_UNORDERED_ACCESS);
+        next_write.close();
+        host.execute(&[&next_write]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_UNORDERED_ACCESS
+        );
     }
 }
 

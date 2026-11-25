@@ -280,30 +280,16 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
 }
 
 /// Whether a texture refresh that finds the runtime remapping title memory
-/// goes on without waiting for it (`VICTORY_TEXTURE_NO_WAIT=1`; off by
-/// default).
+/// goes on without waiting for it.
 ///
-/// A texture whose memory is all mapped is read in place, under a lock
-/// the runtime takes alone while it changes a mapping
-/// (`crate::watch::title_memory_reading`), so that no page goes away under
-/// the read. While the world streams in the runtime remaps all the time,
-/// and each of the frame's 150-360 refreshes waited for it: runs 99-101
-/// have 4, 15 and 16 frame lines with over 300 ms of "textures", up to
-/// 3,708 ms, and on every one of them the wait for this lock is the whole
-/// of it (1,345 of 1,381 ms; 3,630 of 3,708; the write-watch askings 3-12
-/// ms, the texture's own lock 0).
-///
-/// With the switch the refresh asks for the lock without waiting. If the
-/// runtime has it, the texture is read through the kernel instead, which
-/// needs no lock: it fails if a page is not there, and then the texture is
-/// left as it is and read at its next refresh, a frame later. A read
-/// through the kernel costs about 0.6 ms a megabyte against 0.3 in place.
-///
-/// What changes for the picture: a texture that arrives while the runtime
-/// is remapping may show a frame later. It never shows partly read.
+/// This is deliberately always enabled: profiling showed that waiting for
+/// the runtime's remapping lock can consume almost an entire frame. The
+/// nonblocking path reads through the kernel while that lock is held. If a
+/// page is unavailable, it leaves the previous complete texture intact
+/// and retries on the next refresh; it never publishes a partially read
+/// texture. A streamed texture can therefore appear one frame later.
 fn no_wait() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_NO_WAIT").is_some_and(|v| v == "1"))
+    true
 }
 
 /// Since the last frame-rate line, with [`no_wait`]: refreshes that read
@@ -920,6 +906,67 @@ fn committed_by_query(at: *const u8, len: usize) -> bool {
     true
 }
 
+/// Counts mapped 64 KiB console pages with one working-set query per
+/// batch, rather than one kernel query per page. The representative kernel
+/// page and fallback read match readable(lo, 1, true).
+fn mapped_blocks(start: usize, end: usize) -> u64 {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    const BLOCK: usize = 64 << 10;
+    const PAGE: usize = 4096;
+    const BATCH: usize = 256;
+
+    let first_block = start & !(BLOCK - 1);
+    let block_count = end.saturating_sub(first_block).div_ceil(BLOCK);
+    let mut total = 0u64;
+    let mut info: [PSAPI_WORKING_SET_EX_INFORMATION; BATCH] =
+        // SAFETY: the structure is an output record filled by the query.
+        unsafe { std::mem::zeroed() };
+    let mut block = first_block;
+
+    while block < end {
+        let count = (block_count - ((block - first_block) / BLOCK)).min(BATCH);
+        let mut bytes = [0usize; BATCH];
+        for i in 0..count {
+            let base = block + i * BLOCK;
+            let lo = base.max(start);
+            let hi = base.saturating_add(BLOCK).min(end);
+            let page = lo & !(PAGE - 1);
+            bytes[i] = hi - lo;
+            info[i].VirtualAddress = page as *mut _;
+        }
+        // SAFETY: count initialized output records and this process owns
+        // the title memory addresses being queried.
+        let asked = unsafe {
+            K32QueryWorkingSetEx(
+                GetCurrentProcess(),
+                info.as_mut_ptr().cast(),
+                (count * std::mem::size_of::<PSAPI_WORKING_SET_EX_INFORMATION>()) as u32,
+            )
+        } != 0;
+        for i in 0..count {
+            // Bit zero is set when the representative page is resident.
+            // SAFETY: the query filled this record when it succeeded.
+            let valid = asked && unsafe { info[i].VirtualAttributes.Flags } & 1 != 0;
+            if valid {
+                total += bytes[i] as u64;
+            } else {
+                let base = block + i * BLOCK;
+                let lo = base.max(start);
+                let page = (lo & !(PAGE - 1)) as *const u8;
+                let mut byte = [0u8];
+                if crate::host::read_into(page, &mut byte) {
+                    total += bytes[i] as u64;
+                }
+            }
+        }
+        block = block.saturating_add(count * BLOCK);
+    }
+    total
+}
+
 /// How many bytes of `[at, at + len)` are committed memory: all of a
 /// texture that is there, some of one streaming in (its smaller mips lie
 /// at the start of its memory, and their pages are mapped first), none of
@@ -951,17 +998,7 @@ pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
         // for each of its missing pages, every frame it stayed due: 1,663
         // textures "uploaded in part" kept the pass over the heap's views at
         // 90-160 ms a frame (run 81). `VICTORY_MAPPED_BY_PAGE=1`: by page.
-        const BLOCK: usize = 64 << 10;
-        let mut there = 0u64;
-        let mut block = start & !(BLOCK - 1);
-        while block < end {
-            let (lo, hi) = (block.max(start), block.saturating_add(BLOCK).min(end));
-            if readable(lo, 1, true).0 == 1 {
-                there += (hi - lo) as u64;
-            }
-            block = block.saturating_add(BLOCK);
-        }
-        return there;
+        return mapped_blocks(start, end);
     }
     let (mut p, mut there) = (start, 0u64);
     while p < end {

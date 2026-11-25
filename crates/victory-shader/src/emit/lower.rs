@@ -1330,7 +1330,12 @@ impl<'a> Lower<'a> {
                                 // lanes 32..63 are the other host wave: masks, lane reads and lane
                                 // numbers go through two exchange dwords past the program's LDS
                                 exchange = Some((s.lds_dwords, group <= 32, all));
-                                s.lds_dwords += 2 * group.div_ceil(64);
+                                // Two dwords per console wave exchange reductions and
+                                // masks. A bpermute additionally needs one LDS slot
+                                // per lane so a wave64 can exchange across its two
+                                // host wave32 halves.
+                                let per_wave = 2 + if insts().any(|i| i.name() == "ds_bpermute_b32") { 64 } else { 0 };
+                                s.lds_dwords += per_wave * group.div_ceil(64);
                             }
                         }
                     }
@@ -3995,7 +4000,7 @@ impl<'a> Lower<'a> {
     // the host the unused vertex and primitive slots. Pass the program's own
     // counts if that shows in frame time.
     fn mesh_prologue(&mut self, mut mesh: super::shader::Mesh) -> Result<(), Why> {
-        let threads = self.s.threads.expect("mesh")[0];
+        let threads = self.s.threads.expect("mesh").into_iter().product::<u32>();
         if mesh.topology != 2 {
             return Err("a mesh shader not drawing triangles");
         }
@@ -4012,13 +4017,27 @@ impl<'a> Lower<'a> {
             mesh_output_bytes(outputs, prims, m.max_vertices, m.max_primitives) <= MESH_OUTPUT_LIMIT
         };
         if !fits(mesh) {
+            let requested = mesh;
             mesh.max_vertices = mesh.max_vertices.min(threads);
             mesh.max_primitives = mesh.max_primitives.min(threads);
+            let bytes = mesh_output_bytes(outputs, prims, mesh.max_vertices, mesh.max_primitives);
+            let still_over = !fits(mesh);
+            tracing::warn!(
+                threads,
+                requested_vertices = requested.max_vertices,
+                requested_primitives = requested.max_primitives,
+                host_vertices = mesh.max_vertices,
+                host_primitives = mesh.max_primitives,
+                output_bytes = bytes,
+                output_limit = MESH_OUTPUT_LIMIT,
+                still_over,
+                "mesh shader output maxima reduced for the host pipeline"
+            );
             // shortcut: outputs past the cap even at the lane count are
             // still emitted with the lower maxima (drivers take them);
             // refuse them here if one hangs.
             // Experiment (`VICTORY_MESH_OUTPUT_STRICT=1`): they are refused.
-            if !fits(mesh) && std::env::var_os("VICTORY_MESH_OUTPUT_STRICT").is_some() {
+            if still_over && std::env::var_os("VICTORY_MESH_OUTPUT_STRICT").is_some() {
                 return Err("a mesh shader whose outputs pass the host's 32 KiB");
             }
             self.s.mesh = Some(mesh);
@@ -4268,11 +4287,6 @@ impl<'a> Lower<'a> {
             // host (it left through a branch, not a guard) is read as the
             // host gives it; the console reads 0.
             self.cross_lane(false)?;
-            if self.exchange.as_ref().is_some_and(|e| !e.1) {
-                // a console wave of 64 run as two host waves: the lane named
-                // may be in the other one
-                return Err("a lane permute across two host waves");
-            }
             let at = self.vgprs(inst, addr.as_ref().ok_or("a permute address")?, 1)?[0];
             let x = self.vgprs(inst, data.first().ok_or("a permute source")?, 1)?[0];
             let o = self.s.m.i32(offset);
@@ -4288,7 +4302,48 @@ impl<'a> Lower<'a> {
                 }
                 None => x,
             };
-            let r = self.read_lane(x, src);
+            let exchange = self.exchange.as_ref().map(|(slot, small, _)| (*slot, *small));
+            let r = if let Some((slot, false)) = exchange {
+                // A wave64 bpermute may name a lane in the other host wave32.
+                // Stage each console lane's source value in group-shared memory,
+                // then read the requested lane after a full-group rendezvous.
+                if !self.all_lanes(b) {
+                    need(b);
+                    return Err("a cross-half lane permute without a full-wave rendezvous");
+                }
+                let group = self.s.threads.expect("compute").iter().product::<u32>();
+                let waves = group.div_ceil(64);
+                let scratch = slot + 2 * waves;
+                let thread = self.console_thread();
+                let six = self.s.m.i32(6);
+                let wave = self.s.m.bin(c, Bin::LShr, thread, six);
+                let sixty_four = self.s.m.i32(64);
+                let wave_base = self.s.m.bin(c, Bin::Mul, wave, sixty_four);
+                let lane = self.console_lane();
+                let lane_offset = self.s.m.bin(c, Bin::Add, wave_base, lane);
+                let scratch_base = self.s.m.i32(scratch);
+                let index = self.s.m.bin(c, Bin::Add, scratch_base, lane_offset);
+                let lds = self.s.lds();
+                let ptr = self.s.m.element(c, lds, index);
+                self.s.m.store(c, ptr, x);
+                self.group_sync(c);
+                let target_offset = self.s.m.bin(c, Bin::Add, wave_base, src);
+                let target = self.s.m.bin(c, Bin::Add, scratch_base, target_offset);
+                let ptr = self.s.m.element(c, lds, target);
+                let value = self.s.m.load(c, ptr);
+                self.group_sync(c);
+                value
+            } else if exchange.is_some() {
+                // A group of at most 32 threads occupies only the lower half
+                // of the console wave; reads into the absent upper half are zero.
+                let value = self.read_lane(x, src);
+                let thirty_two = self.s.m.i32(32);
+                let present = self.s.m.cmp(c, pred::IULT, src, thirty_two);
+                let zero = self.s.m.i32(0);
+                self.s.m.select(c, present, value, zero)
+            } else {
+                self.read_lane(x, src)
+            };
             let reg = dst_reg.ok_or("a permute result")?;
             self.write(inst, Reg::V(reg), r, guard);
             return Ok(());
@@ -10272,7 +10327,7 @@ impl<'a> Lower<'a> {
             } else {
                 0
             };
-            let threads = self.s.threads.map(|t| t[0]).unwrap_or(u32::MAX);
+            let threads = self.s.threads.map(|t| t.into_iter().product()).unwrap_or(u32::MAX);
             let mesh_guard = if limit > 0 && threads > limit {
                 let lim = self.s.m.i32(limit);
                 let in_bounds = self.s.m.cmp(self.cur, pred::IULT, flat, lim);
@@ -10373,7 +10428,7 @@ impl<'a> Lower<'a> {
         // host would read a vertex nothing set, at any position.
         let written = self.s.mesh.map(|m| {
             m.max_vertices
-                .min(self.s.threads.map_or(u32::MAX, |t| t[0]))
+                .min(self.s.threads.map_or(u32::MAX, |t| t.into_iter().product()))
         });
         let mut indices = [z; 3];
         for (k, slot) in indices.iter_mut().enumerate() {

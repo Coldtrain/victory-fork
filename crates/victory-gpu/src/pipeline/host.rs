@@ -89,8 +89,116 @@ impl Default for GraphicsState {
     }
 }
 
+
+/// Integer render-target formats: D3D12 does not permit blending into them.
+fn integer_format(format: DXGI_FORMAT) -> bool {
+    matches!(
+        format,
+        DXGI_FORMAT_R32G32B32A32_UINT
+            | DXGI_FORMAT_R32G32B32A32_SINT
+            | DXGI_FORMAT_R32G32B32_UINT
+            | DXGI_FORMAT_R32G32B32_SINT
+            | DXGI_FORMAT_R16G16B16A16_UINT
+            | DXGI_FORMAT_R16G16B16A16_SINT
+            | DXGI_FORMAT_R32G32_UINT
+            | DXGI_FORMAT_R32G32_SINT
+            | DXGI_FORMAT_R10G10B10A2_UINT
+            | DXGI_FORMAT_R8G8B8A8_UINT
+            | DXGI_FORMAT_R8G8B8A8_SINT
+            | DXGI_FORMAT_R16G16_UINT
+            | DXGI_FORMAT_R16G16_SINT
+            | DXGI_FORMAT_R32_UINT
+            | DXGI_FORMAT_R32_SINT
+            | DXGI_FORMAT_R8G8_UINT
+            | DXGI_FORMAT_R8G8_SINT
+            | DXGI_FORMAT_R16_UINT
+            | DXGI_FORMAT_R16_SINT
+            | DXGI_FORMAT_R8_UINT
+            | DXGI_FORMAT_R8_SINT
+    )
+}
+
+/// Preserve the title's blend state except that integer targets never blend.
+/// If the title supplied one shared blend state, split it per target first so
+/// disabling blending on an integer target does not affect float/UNORM targets.
+fn host_blend(
+    blend: &D3D12_BLEND_DESC,
+    targets: &D3D12_RT_FORMAT_ARRAY,
+) -> D3D12_BLEND_DESC {
+    let count = (targets.NumRenderTargets as usize).min(8);
+    let per_target = blend.IndependentBlendEnable.as_bool();
+    let enabled = |i: usize| {
+        blend.RenderTarget[if per_target { i } else { 0 }]
+            .BlendEnable
+            .as_bool()
+    };
+    if !(0..count).any(|i| integer_format(targets.RTFormats[i]) && enabled(i)) {
+        return *blend;
+    }
+
+    let mut host = *blend;
+    if !per_target {
+        host.IndependentBlendEnable = true.into();
+        host.RenderTarget = [blend.RenderTarget[0]; 8];
+    }
+    for i in 0..count {
+        if integer_format(targets.RTFormats[i]) {
+            host.RenderTarget[i].BlendEnable = false.into();
+        }
+    }
+    host
+}
+
 impl GraphicsState {
-    /// Takes in one subobject of a stream: its type, then its data at +4
+    /// Copies the graphics state of the plain D3D12 graphics description.
+    ///
+    /// Unlike a stream, this description owns no state after the creation
+    /// call, so input semantic names and elements must be copied here.
+    pub(crate) fn from_desc(desc: &D3D12_GRAPHICS_PIPELINE_STATE_DESC) -> Self {
+        let mut state = Self::default();
+        state.blend = desc.BlendState;
+        state.sample_mask = desc.SampleMask;
+        state.rasterizer = desc.RasterizerState;
+        state.depth = desc.DepthStencilState;
+        state.strip_cut = desc.IBStripCutValue;
+        state.topology = desc.PrimitiveTopologyType;
+        state.targets.NumRenderTargets = desc.NumRenderTargets;
+        for (dst, src) in state.targets.RTFormats.iter_mut().zip(desc.RTVFormats) {
+            dst.0 = crate::resource::target_format(crate::resource::pc_format(src.0 as u32)) as i32;
+        }
+        state.depth_format =
+            DXGI_FORMAT(crate::resource::pc_format(desc.DSVFormat.0 as u32) as i32);
+        state.samples = desc.SampleDesc;
+
+        let layout = desc.InputLayout;
+        if !layout.pInputElementDescs.is_null() && layout.NumElements != 0 {
+            // SAFETY: the caller's pipeline description supplies this many
+            // input elements for the duration of CreateGraphicsPipelineState.
+            let elements = unsafe {
+                std::slice::from_raw_parts(layout.pInputElementDescs, layout.NumElements as usize)
+            };
+            state.names = elements
+                .iter()
+                .map(|e| {
+                    // SAFETY: D3D12 input elements require a valid
+                    // null-terminated semantic name.
+                    unsafe { CStr::from_ptr(e.SemanticName.0.cast()) }.to_owned()
+                })
+                .collect();
+            state.inputs = elements
+                .iter()
+                .zip(&state.names)
+                .map(|(e, name)| D3D12_INPUT_ELEMENT_DESC {
+                    SemanticName: PCSTR(name.as_ptr().cast()),
+                    Format: DXGI_FORMAT(crate::resource::pc_format(e.Format.0 as u32) as i32),
+                    ..*e
+                })
+                .collect();
+        }
+        state
+    }
+
+    /// Takes in one subobject of a stream: its type, then its data at +4: its type, then its data at +4
     /// (+8 for those holding pointers).
     ///
     /// # Safety
@@ -605,7 +713,7 @@ impl HostPipeline {
                     BytecodeLength: gs.len(),
                 }
             }),
-            BlendState: g.blend,
+            BlendState: host_blend(&g.blend, &g.targets),
             SampleMask: g.sample_mask,
             RasterizerState: g.rasterizer,
             DepthStencilState: g.depth,
@@ -761,7 +869,7 @@ fn mesh_pipeline(
         root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
         ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
         ps: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps),
-        blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, g.blend),
+        blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, host_blend(&g.blend, &g.targets)),
         mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
         raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
         depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, g.depth),
@@ -928,4 +1036,62 @@ mod tests {
             "the mesh pipeline was compiled again instead of loaded from the library"
         );
     }
+    fn blend_targets(formats: &[DXGI_FORMAT]) -> D3D12_RT_FORMAT_ARRAY {
+        let mut targets = D3D12_RT_FORMAT_ARRAY {
+            NumRenderTargets: formats.len() as u32,
+            ..Default::default()
+        };
+        targets.RTFormats[..formats.len()].copy_from_slice(formats);
+        targets
+    }
+
+    fn enabled_blend(independent: bool) -> D3D12_BLEND_DESC {
+        let mut blend = GraphicsState::default().blend;
+        blend.IndependentBlendEnable = independent.into();
+        for target in &mut blend.RenderTarget {
+            target.BlendEnable = true.into();
+            target.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+            target.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        }
+        blend
+    }
+
+    #[test]
+    fn integer_targets_do_not_blend() {
+        let targets = blend_targets(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_R8_UINT,
+        ]);
+        for independent in [false, true] {
+            let host = host_blend(&enabled_blend(independent), &targets);
+            assert!(host.IndependentBlendEnable.as_bool());
+            assert!(host.RenderTarget[0].BlendEnable.as_bool());
+            assert!(host.RenderTarget[1].BlendEnable.as_bool());
+            assert!(!host.RenderTarget[2].BlendEnable.as_bool());
+            assert_eq!(host.RenderTarget[2].SrcBlend, D3D12_BLEND_SRC_ALPHA);
+            assert_eq!(host.RenderTarget[0].DestBlend, D3D12_BLEND_INV_SRC_ALPHA);
+        }
+    }
+
+    #[test]
+    fn blend_states_without_integer_blending_are_unchanged() {
+        let blend = enabled_blend(false);
+        let targets = blend_targets(&[
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R11G11B10_FLOAT,
+        ]);
+        assert_eq!(host_blend(&blend, &targets), blend);
+
+        let mut blend = enabled_blend(true);
+        blend.RenderTarget[1].BlendEnable = false.into();
+        let targets = blend_targets(&[DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT]);
+        assert_eq!(host_blend(&blend, &targets), blend);
+
+        let mut targets = blend_targets(&[DXGI_FORMAT_R8G8B8A8_UNORM]);
+        targets.RTFormats[1] = DXGI_FORMAT_R8_UINT;
+        let blend = enabled_blend(false);
+        assert_eq!(host_blend(&blend, &targets), blend);
+    }
+
 }

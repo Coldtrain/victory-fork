@@ -324,6 +324,25 @@ pub(crate) static HEAP_VIEWS_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// index ([`State::heap_buffers`]), and the microseconds they took.
 pub(crate) static HEAP_BUFFER_PASSES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
+/// Time in microseconds spent in each part of the indexed-buffer heap pass:
+/// [slot mirroring, span aggregation, buffer refresh, indexed texture uploads].
+pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Time inside indexed-texture preparation: [queue/remap, slot lookup and mapping, host mirror and view classification, staging/readable checks, total upload loop].
+pub(crate) static HEAP_TEXTURE_PHASES: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+struct HeapPhaseTimer<'a> {
+    counter: &'a AtomicU64,
+    started: std::time::Instant,
+}
+impl<'a> HeapPhaseTimer<'a> {
+    fn new(counter: &'a AtomicU64) -> Self {
+        Self { counter, started: std::time::Instant::now() }
+    }
+}
+impl Drop for HeapPhaseTimer<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_add(self.started.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
+}
 /// Textures brought up to date for shaders that pick them by index
 /// ([`State::heap_textures`]), the bytes of their memory, and the slots
 /// still waiting.
@@ -389,6 +408,10 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
         .min(if srv { limit } else { 1 << 16 });
     let gpu = shadow.gpu(address);
     if srv || gpu % 256 == 0 {
+        list.buffer_state(
+            &shadow,
+            if srv { crate::host::BUFFER_SHADER_RESOURCE } else { crate::host::BUFFER_VERTEX },
+        );
         shadow.refresh(list, address, len);
         return Some(gpu);
     }
@@ -798,11 +821,28 @@ impl State {
             }
             count = slot + 1;
             if v.address == 0 || v.size == 0 {
-                continue;
+                tracing::warn!(
+                    slot,
+                    address = format_args!("{:#x}", v.address),
+                    size = v.size,
+                    stride = v.stride,
+                    pipeline = format_args!("{:#x}", self.pipeline),
+                    "draw requires a vertex buffer that is not bound"
+                );
+                return false;
             }
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
-                continue;
+                tracing::warn!(
+                    slot,
+                    address = format_args!("{:#x}", v.address),
+                    size = v.size,
+                    stride = v.stride,
+                    pipeline = format_args!("{:#x}", self.pipeline),
+                    "draw vertex buffer has no host memory copy"
+                );
+                return false;
             };
+            list.buffer_state(&shadow, crate::host::BUFFER_VERTEX);
             shadow.refresh(list, v.address, u64::from(v.size));
             *view = D3D12_VERTEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -819,8 +859,16 @@ impl State {
         if indexed {
             let v = self.index;
             let Some(shadow) = crate::shadow::find_any(v.address, u64::from(v.size)) else {
+                tracing::warn!(
+                    address = format_args!("{:#x}", v.address),
+                    size = v.size,
+                    format = v.format,
+                    pipeline = format_args!("{:#x}", self.pipeline),
+                    "indexed draw has no host copy of its index buffer"
+                );
                 return false;
             };
+            list.buffer_state(&shadow, crate::host::BUFFER_INDEX);
             shadow.refresh(list, v.address, u64::from(v.size));
             let view = D3D12_INDEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -1113,6 +1161,7 @@ impl State {
         };
         let ready = |a: u64, s: &std::sync::Arc<crate::shadow::Shadow>| {
             let len = s.left(a).min(limit);
+            list.buffer_state(s, crate::host::BUFFER_UNORDERED_ACCESS);
             s.refresh(list, a, len);
             if writes {
                 s.gpu_writes(list, a, len);
@@ -1259,6 +1308,7 @@ impl State {
         // buffer is brought up to date. The first 1 MiB only left what lay
         // past it stale (most mesh vertex streams reach further).
         if let Some((a, s)) = &shadow {
+            list.buffer_state(s, crate::host::BUFFER_SHADER_RESOURCE);
             s.refresh(list, *a, s.left(*a));
         }
         let handle = host.gpu_handle(index);
@@ -1322,6 +1372,7 @@ impl State {
         type Ranges = std::collections::HashMap<u32, (std::sync::Arc<crate::shadow::Shadow>, u64, u64)>;
         static RANGES: std::sync::Mutex<Option<std::collections::HashMap<usize, (u64, Ranges)>>> =
             std::sync::Mutex::new(None);
+        let mut phase = std::time::Instant::now();
         let mut kept = RANGES.lock().unwrap_or_else(|e| e.into_inner());
         let (passes, ranges) = kept
             .get_or_insert_with(Default::default)
@@ -1373,6 +1424,8 @@ impl State {
             }
             ranges.insert(index, (shadow, address, address + len));
         }
+        HEAP_BUFFER_PHASES[0].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
+        phase = std::time::Instant::now();
         let views = ranges.len() as u32;
         // Per host copy, the span its picked views cover.
         let mut spans: std::collections::HashMap<usize, (std::sync::Arc<crate::shadow::Shadow>, u64, u64)> =
@@ -1385,6 +1438,8 @@ impl State {
         }
         drop(kept);
         let bytes: u64 = spans.values().map(|s| s.2 - s.1).sum();
+        HEAP_BUFFER_PHASES[1].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
+        phase = std::time::Instant::now();
         // Memory that is not write-watched is copied whole by every refresh.
         // It was once refreshed only every 120 frames (unmapped pages read
         // one by one cost 14 GB a frame in run 11, before they were
@@ -1417,7 +1472,10 @@ impl State {
             }
             shadow.refresh(list, *from, to - from);
         }
+        HEAP_BUFFER_PHASES[2].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
+        phase = std::time::Instant::now();
         self.heap_textures(list, heap, host);
+        HEAP_BUFFER_PHASES[3].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
         HEAP_BUFFER_PASSES.fetch_add(1, Ordering::Relaxed);
         HEAP_BUFFER_MICROS.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         static LOGGED: AtomicU64 = AtomicU64::new(0);
@@ -1486,11 +1544,13 @@ impl State {
         // Slots whose texture's memory the runtime mapped, unmapped or
         // wrote since the last pass are due again.
         host.texture_slots_remapped(frame);
+        let queue_started = std::time::Instant::now();
         let (due, census) = host.texture_slots_due(frame, 4096);
         HEAP_TEXTURES_WAITING.store(census[0], Ordering::Relaxed);
         for (count, now) in HEAP_TEXTURES_QUEUE.iter().zip(census) {
             count.store(now, Ordering::Relaxed);
         }
+        HEAP_TEXTURE_PHASES[0].fetch_add(queue_started.elapsed().as_micros() as u64, Ordering::Relaxed);
         // The frames in about four seconds, between 16 and 256: how long a
         // slot with nothing to upload waits at most for its next look. In
         // frames alone it was 120: four minutes at the opening cutscene's
@@ -1518,7 +1578,9 @@ impl State {
         // The rest waits for the next frames, as it does past the bytes.
         const SPAN: std::time::Duration = std::time::Duration::from_millis(250);
         let began = std::time::Instant::now();
+        let loop_started = std::time::Instant::now();
         for (index, write) in due {
+            let slot_phase = HeapPhaseTimer::new(&HEAP_TEXTURE_PHASES[1]);
             if SPENT.load(Ordering::Relaxed) >= PER_FRAME || began.elapsed() > SPAN {
                 break;
             }
@@ -1534,9 +1596,13 @@ impl State {
             // page alone, one whose first page is the one missing counted
             // as not there.)
             let mut partly = None;
-            if let Some(View::Placed(false, resource, desc)) = heap.handle(index).and_then(crate::descriptor::view) {
+            // Resolve the title descriptor once. The previous path decoded
+            // the same slot again below before mirroring it.
+            let handle = heap.handle(index);
+            let title_view = handle.and_then(crate::descriptor::view);
+            if let Some(View::Placed(false, resource_desc, desc)) = title_view.as_ref() {
                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
-                let len = crate::resource::placed_bytes(&resource).unwrap_or(1);
+                let len = crate::resource::placed_bytes(resource_desc).unwrap_or(1);
                 let mapped = crate::texture::mapped_bytes(address as *const u8, len as usize);
                 if mapped == 0 {
                     HEAP_TEXTURES_AWAY.fetch_add(1, Ordering::Relaxed);
@@ -1557,13 +1623,15 @@ impl State {
                     partly = Some(mapped);
                 }
             }
+            drop(slot_phase);
+            let mirror_phase = HeapPhaseTimer::new(&HEAP_TEXTURE_PHASES[2]);
             // A texture object the host renders to or writes holds the
             // host's own contents: nothing to bring up to date, and this
             // pass is no use of it (its host copy is made when something
             // uses it, and its slots then: `descriptor::make_waiting`).
-            if let Some(View::Shader(object, _)) = heap.handle(index).and_then(crate::descriptor::view)
-                && crate::resource::buffer_bytes(object as This).is_none()
-                && !crate::resource::title_fills(object as This)
+            if let Some(View::Shader(object, _)) = title_view.as_ref()
+                && crate::resource::buffer_bytes(*object as This).is_none()
+                && !crate::resource::title_fills(*object as This)
             {
                 host.texture_slot_done(index, write, None);
                 continue;
@@ -1577,7 +1645,7 @@ impl State {
                 }
                 continue;
             }
-            let view = heap.handle(index).and_then(|handle| host.mirror(index, handle, true));
+            let view = handle.and_then(|handle| host.mirror(index, handle, true));
             let placed = view.as_ref().and_then(crate::descriptor::host::placed_texture);
             let resource = match placed.as_ref().or(view.as_ref()) {
                 Some(&View::Shader(resource, _)) => resource as This,
@@ -1586,6 +1654,8 @@ impl State {
                     continue;
                 }
             };
+            drop(mirror_phase);
+            let staging_phase = HeapPhaseTimer::new(&HEAP_TEXTURE_PHASES[3]);
             let title_fills = crate::resource::host_resource(resource).is_some_and(crate::texture::title_written);
             if !title_fills {
                 // a render target, a depth or unordered access texture: the host's own
@@ -1631,6 +1701,7 @@ impl State {
                 host.texture_slot_done(index, write, again);
                 continue;
             }
+            drop(staging_phase);
             // Uploaded: the list holds the staging buffer until it has run;
             // a table read, or the next look at a texture not all mapped
             // yet, makes it anew. (Kept for those until now: every partly
@@ -1642,6 +1713,7 @@ impl State {
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
             host.texture_slot_done(index, write, again);
         }
+        HEAP_TEXTURE_PHASES[4].fetch_add(loop_started.elapsed().as_micros() as u64, Ordering::Relaxed);
     }
 
     /// For the frame listing, after a dropped dispatch's line: its group
@@ -1813,19 +1885,29 @@ impl State {
         }
     }
 
-    /// Runs a mesh dispatch of `x` groups on the host (the title's mesh
-    /// programs are one-dimensional).
-    pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32) {
+    /// Runs a mesh dispatch. The title's mesh programs are one-dimensional:
+    /// meshlet IDs are taken from the x group only, so y/z are normalized.
+    pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
         self.window = None;
+        if y != 1 || z != 1 {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    x, y, z,
+                    "title issued a non-one-dimensional mesh dispatch; using DispatchMesh(x, 1, 1)"
+                );
+            });
+        }
         #[cfg(feature = "diagnostics")]
         self.trace("mesh", x, 0);
-        let ran = mesh_test() != 1
+        let ran = x != 0
+            && mesh_test() != 1
             && mesh_kept(self.pipeline)
             && self.prepare_for(list, false, true)
             && match list.list.cast::<ID3D12GraphicsCommandList6>() {
                 Ok(l6) => {
                     #[cfg(feature = "diagnostics")]
-                    list.note_op(|| self.op_text(format!("mesh {x}"), false));
+                    list.note_op(|| self.op_text(format!("mesh {x} (title {x}x{y}x{z})"), false));
                     self.mesh_scissor(list, true);
                     // SAFETY: an open list with everything set.
                     unsafe { l6.DispatchMesh(x, 1, 1) };
@@ -2411,8 +2493,10 @@ impl State {
                     }
                     _ => (stride, max),
                 };
+                list.buffer_state(&args, crate::host::BUFFER_SHADER_RESOURCE);
                 args.refresh(list, arguments, len.max(u64::from(step) * u64::from(records)));
                 if let Some((s, at)) = &counter {
+                    list.buffer_state(s, crate::host::BUFFER_SHADER_RESOURCE);
                     s.refresh(list, *at, 4);
                 }
                 // Bounded first: the clamp binds a compute pipeline of its
@@ -2455,6 +2539,9 @@ impl State {
             crate::indirect::done(list, &bounded);
             why("prepare failed");
             return false;
+        }
+        if let Some((counter, _)) = &counter {
+            list.buffer_state(counter, crate::host::BUFFER_INDIRECT_ARGUMENT);
         }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| {
@@ -2571,6 +2658,15 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
     // Buffer views read title memory: their range is copied at submission;
     // what shaders write through unordered access goes back to it after.
     if let Some((shadow, address, len)) = crate::descriptor::host::buffer_copy(view) {
+        let state = match kind {
+            ResourceType::Cbv => crate::host::BUFFER_VERTEX,
+            ResourceType::Srv => crate::host::BUFFER_SHADER_RESOURCE,
+            ResourceType::Uav => crate::host::BUFFER_UNORDERED_ACCESS,
+            _ => 0,
+        };
+        if state != 0 {
+            list.buffer_state(&shadow, state);
+        }
         shadow.refresh(list, address, len);
         if kind == ResourceType::Uav {
             // A shader that cannot store to buffers leaves the range as

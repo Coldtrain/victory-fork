@@ -8,7 +8,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::alloc::{Layout, alloc, dealloc};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -370,6 +370,10 @@ struct Physical {
     pages: HashMap<usize, Slice>,
     /// Mapped views by address: their length and what they show.
     views: BTreeMap<usize, (usize, Slice)>,
+    /// Every title address showing a physical section page, keyed by the
+    /// section identity and page index. DirectStorage writes through a
+    /// separate section view, so all aliases must be notified explicitly.
+    shown: HashMap<(usize, usize), HashSet<usize>>,
 }
 
 static PHYSICAL: LazyLock<Mutex<Physical>> = LazyLock::new(|| {
@@ -382,6 +386,30 @@ static PHYSICAL: LazyLock<Mutex<Physical>> = LazyLock::new(|| {
 
 fn physical() -> MutexGuard<'static, Physical> {
     PHYSICAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Addresses at which the title currently maps any of these physical pages.
+fn shown_at(pages: &[usize]) -> Vec<usize> {
+    let physical = physical();
+    let mut shown = HashSet::new();
+    for page in pages {
+        let Some(slice) = physical.pages.get(page) else {
+            continue;
+        };
+        let key = (Arc::as_ptr(&slice.section) as usize, slice.index);
+        if let Some(addresses) = physical.shown.get(&key) {
+            shown.extend(addresses.iter().copied());
+        }
+    }
+    shown.into_iter().collect()
+}
+
+/// Tell the GPU memory tracker that writes through our section views changed
+/// every title mapping that aliases those physical pages.
+fn report_written(shown: &[usize]) {
+    for &address in shown {
+        let _ = victory_gpu::kernel_will_write(address, PAGE);
+    }
 }
 
 /// `count` is in and out (pages wanted, pages given); all or nothing here.
@@ -545,6 +573,11 @@ pub(crate) fn write_physical(pages: &[usize], offset: usize, data: &[u8]) -> boo
     let Some(runs) = runs(pages, offset, data.len()) else {
         return false;
     };
+    let end = offset + data.len();
+    let Some(touched) = pages.get(offset / PAGE..end.div_ceil(PAGE)) else {
+        return false;
+    };
+    let shown = shown_at(touched);
     let (mut within, mut done) = (offset % PAGE, 0);
     for (slice, n) in &runs {
         let Some(mut view) = View::map(slice, *n) else {
@@ -554,6 +587,7 @@ pub(crate) fn write_physical(pages: &[usize], offset: usize, data: &[u8]) -> boo
         view.bytes()[within..within + k].copy_from_slice(&data[done..done + k]);
         (within, done) = (0, done + k);
     }
+    report_written(&shown);
     true
 }
 
@@ -564,6 +598,14 @@ pub(crate) struct PageWindow {
     view: View,
     within: usize,
     len: usize,
+    /// Title mappings showing these pages, notified when the write ends.
+    shown: Vec<usize>,
+}
+
+impl Drop for PageWindow {
+    fn drop(&mut self) {
+        report_written(&self.shown);
+    }
 }
 
 impl PageWindow {
@@ -583,10 +625,14 @@ pub(crate) fn page_window(pages: &[usize], offset: usize, len: usize) -> Option<
     let [(slice, n)] = runs.as_slice() else {
         return None;
     };
+    let view = View::map(slice, *n)?;
+    let end = offset.checked_add(len)?;
+    let touched = pages.get(offset / PAGE..end.div_ceil(PAGE))?;
     Some(PageWindow {
-        view: View::map(slice, *n)?,
+        view,
         within: offset % PAGE,
         len,
+        shown: shown_at(touched),
     })
 }
 
@@ -740,7 +786,11 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     victory_gpu::title_memory_remapped(base, len);
     // What the range shows now, for the GPU side's in-place census.
     victory_gpu::title_memory_view(base, len, slice.section.0 as usize, (slice.index * PAGE) as u64);
-    physical.views.insert(base, (len, slice));
+    physical.views.insert(base, (len, slice.clone()));
+    for page in 0..len / PAGE {
+        let key = (Arc::as_ptr(&slice.section) as usize, slice.index + page);
+        physical.shown.entry(key).or_default().insert(base + page * PAGE);
+    }
     true
 }
 
@@ -818,6 +868,18 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
         let Some((size, slice)) = physical.views.remove(&at) else {
             continue;
         };
+        for page in 0..size / PAGE {
+            let key = (Arc::as_ptr(&slice.section) as usize, slice.index + page);
+            let empty = if let Some(addresses) = physical.shown.get_mut(&key) {
+                addresses.remove(&(at + page * PAGE));
+                addresses.is_empty()
+            } else {
+                false
+            };
+            if empty {
+                physical.shown.remove(&key);
+            }
+        }
         victory_gpu::title_memory_remapped(at, size);
         // SAFETY: a view we mapped; it becomes a placeholder again.
         unsafe {
@@ -1250,6 +1312,50 @@ mod tests {
     fn page_bytes(page: usize) -> Vec<u8> {
         let slice = physical().pages.get(&page).cloned().expect("known page");
         View::map(&slice, 1).expect("mapped").bytes().to_vec()
+    }
+
+    #[test]
+    fn direct_storage_writes_notify_every_mapped_alias() {
+        let pages = allocate(2);
+        let reserve = || {
+            XMemVirtualAlloc(
+                std::ptr::null_mut(),
+                2 * PAGE,
+                MEM_RESERVE | PAGES_64K,
+                0,
+                PAGE_READWRITE,
+            )
+        };
+        let (a, b) = (reserve(), reserve());
+        assert!(!a.is_null() && !b.is_null());
+        assert_eq!(XMemMapPhysicalPages(a, 2, pages.as_ptr()), a);
+        assert_eq!(
+            XMemMapPhysicalPages(b.wrapping_byte_add(PAGE), 1, pages[1..].as_ptr()),
+            b.wrapping_byte_add(PAGE)
+        );
+
+        let mut shown = shown_at(&pages[1..]);
+        shown.sort_unstable();
+        let mut expected = vec![(a as usize) + PAGE, (b as usize) + PAGE];
+        expected.sort_unstable();
+        assert_eq!(shown, expected);
+
+        assert!(write_physical(&pages[1..], 0, &[0xA5, 0x5A]));
+        // SAFETY: both addresses map the same committed physical page.
+        unsafe {
+            assert_eq!(b.wrapping_byte_add(PAGE).cast::<u8>().read(), 0xA5);
+            assert_eq!(a.wrapping_byte_add(PAGE).cast::<u8>().read(), 0xA5);
+            assert_eq!(b.wrapping_byte_add(PAGE).cast::<u8>().add(1).read(), 0x5A);
+        }
+
+        assert_eq!(
+            XMemMapPhysicalPages(b.wrapping_byte_add(PAGE), 1, std::ptr::null()),
+            b.wrapping_byte_add(PAGE)
+        );
+        assert_eq!(shown_at(&pages[1..]), vec![(a as usize) + PAGE]);
+        assert_eq!(XMemMapPhysicalPages(a, 2, std::ptr::null()), a);
+        assert!(shown_at(&pages[1..]).is_empty());
+        assert_eq!(XMemFreePhysicalPages(2, pages.as_ptr()), 1);
     }
 
     #[test]

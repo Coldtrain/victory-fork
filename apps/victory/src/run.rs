@@ -5,6 +5,10 @@ use anyhow::{Context, Result};
 use crate::{Console, Unimplemented};
 
 #[cfg(windows)]
+#[path = "startup_ui.rs"]
+mod startup_ui;
+
+#[cfg(windows)]
 pub fn run(
     exe: &Path,
     unimplemented: Unimplemented,
@@ -124,11 +128,34 @@ pub fn run(
     }));
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
+
+    // Run title initialization so it can create the initial pipeline batch.
+    // The first host present is held by the pipeline startup barrier until
+    // that batch has compiled or the user explicitly bypasses the wait.
+    let stop_progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_stop = stop_progress.clone();
+    let progress = std::thread::Builder::new()
+        .name("victory-startup-progress".into())
+        .spawn(move || startup_progress_screen(progress_stop))
+        .ok();
+
     let code = main
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
+    stop_progress.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(progress) = progress {
+        let _ = progress.join();
+    }
     println!("title exited with {code}");
     Ok(())
+}
+
+
+/// Runs the native graphical loading window while the first host frame is
+/// held. The UI is independent of the emulated title's swap chain.
+#[cfg(windows)]
+fn startup_progress_screen(stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    startup_ui::run(stop);
 }
 
 /// The debugging aids (README): scheduled stack dumps, watched values and
