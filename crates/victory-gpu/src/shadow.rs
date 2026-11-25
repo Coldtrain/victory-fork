@@ -187,7 +187,7 @@ pub(crate) fn card_stats() -> [u64; 10] {
 /// for each 64 KiB piece (a copy that does not start on a piece boundary
 /// has one piece more).
 pub(crate) fn card_hash_bytes(size: u64) -> u64 {
-    (size / PIECE as u64 + 2) * 16
+    (size / CARD_PIECE as u64 + 2) * 16
 }
 
 /// A buffer of `size` bytes in the card's memory for a title buffer's
@@ -373,13 +373,13 @@ pub(crate) struct CardSpan {
 /// [`CardSpan`] for offsets `[from, to)` (`from < to`) of a copy of title
 /// memory from `start` on.
 fn card_span_of(start: usize, from: usize, to: usize) -> CardSpan {
-    let pieces = pieces_of(start, from, to);
+    let pieces = card_pieces_of(start, from, to);
     CardSpan {
         from: from as u32,
         to: to as u32,
         first: pieces.start as u32,
         pieces: pieces.len() as u32,
-        skew: (start % PIECE) as u32,
+        skew: (start % CARD_PIECE) as u32,
     }
 }
 
@@ -387,20 +387,20 @@ fn card_span_of(start: usize, from: usize, to: usize) -> CardSpan {
 /// `len` bytes of title memory from `start` on: what is fetched and merged
 /// of a piece the compare found differing.
 fn card_piece_of(start: usize, len: usize, span: &CardSpan, i: u32) -> (usize, usize) {
-    let (lo, hi) = piece_at(start, len, (span.first + i) as usize);
+    let (lo, hi) = card_piece_at(start, len, (span.first + i) as usize);
     (lo.max(span.from as usize), hi.min(span.to as usize))
 }
 
 #[cfg(test)]
 mod card_tests {
-    use super::{CardSpan, PIECE, card_piece_of, card_span_of, joined, joined_piece_runs};
+    use super::{CardSpan, CARD_PIECE, card_piece_of, card_span_of, joined, joined_piece_runs};
 
     /// Joined runs hold every piece of the runs given, once, and no other.
     #[test]
     fn piece_runs_join_without_losing_or_adding_pieces() {
         let run = |first: u32, pieces: u32| CardSpan {
-            from: first * 65536,
-            to: (first + pieces) * 65536,
+            from: first * CARD_PIECE as u32,
+            to: (first + pieces) * CARD_PIECE as u32,
             first,
             pieces,
             skew: 7,
@@ -421,9 +421,9 @@ mod card_tests {
     /// in host.rs), before it widens them to 16 bytes.
     fn shader_piece(span: &CardSpan, i: u32) -> (u32, u32) {
         let piece = span.first + i;
-        let lo = piece * 65536;
+        let lo = piece * CARD_PIECE as u32;
         let lo = if lo > span.skew { lo - span.skew } else { 0 };
-        let hi = (piece + 1) * 65536 - span.skew;
+        let hi = (piece + 1) * CARD_PIECE as u32 - span.skew;
         (lo.max(span.from), hi.min(span.to))
     }
 
@@ -431,15 +431,15 @@ mod card_tests {
     /// arithmetic names the same bytes as ours.
     #[test]
     fn the_shader_and_the_merge_cut_the_same_pieces() {
-        for start in [0usize, 4096, PIECE - 16, PIECE, 3 * PIECE + 0x1f00, 0xd_b790_df00] {
-            let len = 5 * PIECE + 4096;
-            for (from, to) in [(0, len), (0, 1), (16, PIECE), (PIECE - 4, PIECE + 4), (2 * PIECE, len), (12345, 4 * PIECE + 7)] {
+        for start in [0usize, 4096, CARD_PIECE - 16, CARD_PIECE, 3 * CARD_PIECE + 0x1f00, 0xd_b790_df00] {
+            let len = 5 * CARD_PIECE + 4096;
+            for (from, to) in [(0, len), (0, 1), (16, CARD_PIECE), (CARD_PIECE - 4, CARD_PIECE + 4), (2 * CARD_PIECE, len), (12345, 4 * CARD_PIECE + 7)] {
                 let span = card_span_of(start, from, to);
                 let mut at = from;
                 for i in 0..span.pieces {
                     let (lo, hi) = card_piece_of(start, len, &span, i);
                     assert_eq!(lo, at, "{start:#x} {from} {to} piece {i}");
-                    assert!(hi > lo && hi - lo <= PIECE);
+                    assert!(hi > lo && hi - lo <= CARD_PIECE);
                     assert_eq!(shader_piece(&span, i), (lo as u32, hi as u32), "{start:#x} {from} {to} piece {i}");
                     at = hi;
                 }
@@ -1458,9 +1458,7 @@ fn kept_most() -> u64 {
     })
 }
 
-/// The 64 KiB pieces, cut at multiples of 64 KiB of title memory, that
-/// hold offsets `[from, to)` of a copy of memory from `start` on
-/// (`from < to`); piece 0 holds offset 0.
+/// The 64 KiB pieces used by the CPU-side snapshot and write-watch path.
 fn pieces_of(start: usize, from: usize, to: usize) -> std::ops::Range<usize> {
     let first = start / PIECE;
     (start + from) / PIECE - first..(start + to - 1) / PIECE - first + 1
@@ -1472,6 +1470,26 @@ fn piece_at(start: usize, len: usize, piece: usize) -> (usize, usize) {
     let first = start / PIECE;
     let lo = ((first + piece) * PIECE).saturating_sub(start);
     let hi = ((first + piece + 1) * PIECE - start).min(len);
+    (lo, hi)
+}
+
+/// Card-side shader comparison/readback granularity. Kept separate from
+/// the CPU-side 64 KiB snapshot granularity so this experiment changes only
+/// the amount fetched for each changed card-side region.
+const CARD_PIECE: usize = 16 << 10;
+
+/// The offsets held by the card-side comparison pieces, cut at multiples
+/// of `CARD_PIECE` in title memory.
+fn card_pieces_of(start: usize, from: usize, to: usize) -> std::ops::Range<usize> {
+    let first = start / CARD_PIECE;
+    (start + from) / CARD_PIECE - first..(start + to - 1) / CARD_PIECE - first + 1
+}
+
+/// The offsets of card-side piece `piece` in a copy of `len` bytes.
+fn card_piece_at(start: usize, len: usize, piece: usize) -> (usize, usize) {
+    let first = start / CARD_PIECE;
+    let lo = ((first + piece) * CARD_PIECE).saturating_sub(start);
+    let hi = ((first + piece + 1) * CARD_PIECE - start).min(len);
     (lo, hi)
 }
 
