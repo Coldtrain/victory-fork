@@ -267,11 +267,17 @@ pub(crate) fn place(device: &ID3D12Device, heap: &ID3D12Heap, offset: u64, size:
 struct Views {
     /// By address: bytes, the section's handle, the offset in it.
     views: BTreeMap<usize, (usize, usize, u64)>,
+    /// By section and byte offset of a 64 KiB page: every address showing it.
+    pages: BTreeMap<(usize, u64), Vec<usize>>,
     /// Sections by handle: bytes, and whether made committed.
     sections: Vec<(usize, u64, bool)>,
 }
 
-static VIEWS: Mutex<Views> = Mutex::new(Views { views: BTreeMap::new(), sections: Vec::new() });
+static VIEWS: Mutex<Views> = Mutex::new(Views {
+    views: BTreeMap::new(),
+    pages: BTreeMap::new(),
+    sections: Vec::new(),
+});
 
 fn views() -> std::sync::MutexGuard<'static, Views> {
     VIEWS.lock().unwrap_or_else(|e| e.into_inner())
@@ -288,7 +294,16 @@ pub fn title_memory_section(section: usize, bytes: u64, committed: bool) {
 /// The runtime mapped `[at, at + len)` as a view of `section` from
 /// `offset` on. Call after [`crate::title_memory_remapped`] of the range.
 pub fn title_memory_view(at: usize, len: usize, section: usize, offset: u64) {
-    views().views.insert(at, (len, section, offset));
+    {
+        let mut v = views();
+        v.views.insert(at, (len, section, offset));
+        for k in 0..len.div_ceil(K64) {
+            v.pages.entry((section, offset + (k * K64) as u64)).or_default().push(at + k * K64);
+        }
+    }
+    // A newly mapped view is writable: any guard over another view of the
+    // same physical pages must be opened so its next refresh sees the write.
+    crate::watch::views_mapped(section, offset, len);
 }
 
 /// What `[at, at + len)` showed is gone ([`crate::title_memory_remapped`]):
@@ -303,8 +318,52 @@ pub(crate) fn views_gone(at: usize, len: usize) {
     let first = v.views.range(..=at).next_back().filter(|(base, view)| *base + view.0 > at).map(|(base, _)| *base);
     let gone: Vec<usize> = first.into_iter().chain(v.views.range(at.saturating_add(1)..end).map(|(base, _)| *base)).collect();
     for base in gone {
-        v.views.remove(&base);
+        let Some((bytes, section, offset)) = v.views.remove(&base) else {
+            continue;
+        };
+        for k in 0..bytes.div_ceil(K64) {
+            let key = (section, offset + (k * K64) as u64);
+            if let Some(pages) = v.pages.get_mut(&key) {
+                let page = base + k * K64;
+                pages.retain(|&shown| shown != page);
+                if pages.is_empty() {
+                    v.pages.remove(&key);
+                }
+            }
+        }
     }
+}
+
+/// The title's views that overlap `[start, end)`, as `(address, bytes)`.
+pub(crate) fn views_between(start: usize, end: usize) -> Vec<(usize, usize)> {
+    if start >= end {
+        return Vec::new();
+    }
+    let v = views();
+    let mut out = Vec::new();
+    if let Some((&base, &(bytes, _, _))) = v.views.range(..=start).next_back()
+        && base + bytes > start
+    {
+        out.push((base, bytes));
+    }
+    for (&base, &(bytes, _, _)) in v.views.range(start.saturating_add(1)..end) {
+        out.push((base, bytes));
+    }
+    out
+}
+
+/// The address of the 64 KiB page shown at `page` in every title view
+/// that shows it, including its own address.
+pub(crate) fn pages_of(page: usize) -> Vec<usize> {
+    let v = views();
+    let Some((&base, &(bytes, section, offset))) = v.views.range(..=page).next_back() else {
+        return Vec::new();
+    };
+    let within = page.wrapping_sub(base);
+    if within >= bytes || !within.is_multiple_of(K64) {
+        return Vec::new();
+    }
+    v.pages.get(&(section, offset + within as u64)).cloned().unwrap_or_default()
 }
 
 /// How the views cover `[at, at + len)`.
