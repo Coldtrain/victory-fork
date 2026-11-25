@@ -408,7 +408,7 @@ fn shown_at(pages: &[usize]) -> Vec<usize> {
 /// every title mapping that aliases those physical pages.
 fn report_written(shown: &[usize]) {
     for &address in shown {
-        drop(victory_gpu::kernel_will_write(address, PAGE));
+        let _ = victory_gpu::kernel_will_write(address, PAGE);
     }
 }
 
