@@ -648,6 +648,44 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn adjacent_card_fetch_pieces_share_one_copy_command() {
+        let pieces = [
+            (0, 0, 1 << 16, 0),
+            (0, 1 << 16, 2 << 16, 1 << 16),
+            (0, 3 << 16, 4 << 16, 2 << 16),
+            (1, 0, 1 << 16, 3 << 16),
+            (1, 1 << 16, 2 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::card_fetch_runs(&pieces),
+            [
+                (0, 0, 0, 2 << 16),
+                (0, 3 << 16, 2 << 16, 1 << 16),
+                (1, 0, 3 << 16, 2 << 16),
+            ]
+        );
+    }
+
+    #[test]
+    fn card_fetch_runs_do_not_join_source_or_destination_gaps() {
+        let pieces = [
+            (0, 0, 1 << 16, 0),
+            (0, 2 << 16, 3 << 16, 1 << 16),
+            (0, 3 << 16, 4 << 16, 3 << 16),
+            (1, 4 << 16, 5 << 16, 4 << 16),
+        ];
+        assert_eq!(
+            super::card_fetch_runs(&pieces),
+            [
+                (0, 0, 0, 1 << 16),
+                (0, 2 << 16, 1 << 16, 1 << 16),
+                (0, 3 << 16, 3 << 16, 1 << 16),
+                (1, 4 << 16, 4 << 16, 1 << 16),
+            ]
+        );
+    }
+
+    #[test]
     fn sparse_copies_preserve_islands_and_observe_remaps() {
         use windows_sys::Win32::System::Memory::*;
         const N: usize = 5 << 16;
@@ -3483,6 +3521,27 @@ impl Host {
         LINE_LANDED.notify_all();
     }
 
+/// Adjacent pieces from the same title-buffer range occupy contiguous source
+/// and readback offsets. One D3D12 copy command can transfer the whole run;
+/// keep the per-piece records separately for the later byte-accurate merge.
+fn card_fetch_runs(pieces: &[(usize, usize, usize, u64)]) -> Vec<(usize, u64, u64, u64)> {
+    let mut runs: Vec<(usize, u64, u64, u64)> = Vec::with_capacity(pieces.len());
+    for &(range, from, to, fetched_at) in pieces {
+        let bytes = (to - from) as u64;
+        match runs.last_mut() {
+            Some(last)
+                if last.0 == range
+                    && last.1 + last.3 == from as u64
+                    && last.2 + last.3 == fetched_at =>
+            {
+                last.3 += bytes;
+            }
+            _ => runs.push((range, from as u64, fetched_at, bytes)),
+        }
+    }
+    runs
+}
+
     /// After a submission ran, for copies in the card's memory: the pieces
     /// of the declared ranges that the compare found differing (all of a
     /// range it did not compare) are fetched, with one more wait for the
@@ -3540,8 +3599,12 @@ impl Host {
                 (|| -> windows::core::Result<()> {
                     allocator.Reset()?;
                     list.Reset(allocator, None)?;
-                    for &(i, lo, hi, at) in &pieces {
-                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo as u64, (hi - lo) as u64);
+                    // The compare flags 64 KiB pieces, but adjacent pieces
+                    // in one declared range are contiguous in both resources.
+                    // Batch those copies without changing the per-piece merge
+                    // records below.
+                    for (i, lo, at, bytes) in card_fetch_runs(&pieces) {
+                        list.CopyBufferRegion(fetched, at, &plan.ranges[i].shadow.buffer, lo, bytes);
                     }
                     list.Close()?;
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
