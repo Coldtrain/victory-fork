@@ -408,6 +408,10 @@ fn root_view(list: &HostList, address: u64, srv: bool) -> Option<u64> {
         .min(if srv { limit } else { 1 << 16 });
     let gpu = shadow.gpu(address);
     if srv || gpu % 256 == 0 {
+        list.buffer_state(
+            &shadow,
+            if srv { crate::host::BUFFER_SHADER_RESOURCE } else { crate::host::BUFFER_VERTEX },
+        );
         shadow.refresh(list, address, len);
         return Some(gpu);
     }
@@ -838,6 +842,7 @@ impl State {
                 );
                 return false;
             };
+            list.buffer_state(&shadow, crate::host::BUFFER_VERTEX);
             shadow.refresh(list, v.address, u64::from(v.size));
             *view = D3D12_VERTEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -863,6 +868,7 @@ impl State {
                 );
                 return false;
             };
+            list.buffer_state(&shadow, crate::host::BUFFER_INDEX);
             shadow.refresh(list, v.address, u64::from(v.size));
             let view = D3D12_INDEX_BUFFER_VIEW {
                 BufferLocation: shadow.gpu(v.address),
@@ -1155,6 +1161,7 @@ impl State {
         };
         let ready = |a: u64, s: &std::sync::Arc<crate::shadow::Shadow>| {
             let len = s.left(a).min(limit);
+            list.buffer_state(s, crate::host::BUFFER_UNORDERED_ACCESS);
             s.refresh(list, a, len);
             if writes {
                 s.gpu_writes(list, a, len);
@@ -1301,6 +1308,7 @@ impl State {
         // buffer is brought up to date. The first 1 MiB only left what lay
         // past it stale (most mesh vertex streams reach further).
         if let Some((a, s)) = &shadow {
+            list.buffer_state(s, crate::host::BUFFER_SHADER_RESOURCE);
             s.refresh(list, *a, s.left(*a));
         }
         let handle = host.gpu_handle(index);
@@ -2485,8 +2493,10 @@ impl State {
                     }
                     _ => (stride, max),
                 };
+                list.buffer_state(&args, crate::host::BUFFER_SHADER_RESOURCE);
                 args.refresh(list, arguments, len.max(u64::from(step) * u64::from(records)));
                 if let Some((s, at)) = &counter {
+                    list.buffer_state(s, crate::host::BUFFER_SHADER_RESOURCE);
                     s.refresh(list, *at, 4);
                 }
                 // Bounded first: the clamp binds a compute pipeline of its
@@ -2529,6 +2539,9 @@ impl State {
             crate::indirect::done(list, &bounded);
             why("prepare failed");
             return false;
+        }
+        if let Some((counter, _)) = &counter {
+            list.buffer_state(counter, crate::host::BUFFER_INDIRECT_ARGUMENT);
         }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| {
@@ -2645,6 +2658,15 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
     // Buffer views read title memory: their range is copied at submission;
     // what shaders write through unordered access goes back to it after.
     if let Some((shadow, address, len)) = crate::descriptor::host::buffer_copy(view) {
+        let state = match kind {
+            ResourceType::Cbv => crate::host::BUFFER_VERTEX,
+            ResourceType::Srv => crate::host::BUFFER_SHADER_RESOURCE,
+            ResourceType::Uav => crate::host::BUFFER_UNORDERED_ACCESS,
+            _ => 0,
+        };
+        if state != 0 {
+            list.buffer_state(&shadow, state);
+        }
         shadow.refresh(list, address, len);
         if kind == ResourceType::Uav {
             // A shader that cannot store to buffers leaves the range as
