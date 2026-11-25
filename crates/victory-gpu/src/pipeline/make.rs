@@ -150,10 +150,38 @@ pub(crate) fn now(p: &Arc<Pending>) -> bool {
     p.made.get().is_some_and(|made| made.is_some())
 }
 
-/// At the title's creation of a pipeline: starts it at once if an earlier
-/// run drew with it (during loading, so the world's first frames find it).
+/// Whether creation-time pipeline precompilation is enabled. This is on
+/// by default: the title's pipeline descriptions are the only authoritative
+/// source for the host PSO state, so queue each one as soon as it is known.
+/// Set VICTORY_PIPELINE_PRECOMPILE=0 to restore first-use compilation.
+fn precompile_on_create() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_PIPELINE_PRECOMPILE")
+            .is_none_or(|value| value != "0");
+        tracing::info!(enabled = on, "creation-time host pipeline precompilation");
+        on
+    })
+}
+
+/// At title pipeline creation, preserve its key for the next run and queue
+/// the host PSO immediately. This is the precompiler: shader translation and
+/// D3D12 PSO creation run on the pipeline workers before the first draw asks
+/// for the pipeline. Previously only pipelines used in a prior run were
+/// queued here, leaving first-run discovery entirely demand-driven.
 pub(crate) fn early(p: &Arc<Pending>) {
-    if !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
+    if p.shaders.is_empty() {
+        return;
+    }
+
+    // Persist every discovered description, not just descriptions that
+    // happened to reach a draw. The next launch can prewarm these as soon
+    // as the title recreates them during its own initialization.
+    if !p.used.swap(true, Ordering::Relaxed) {
+        super::library::note_used(&p.key);
+    }
+
+    if precompile_on_create() || super::library::wanted_early(&p.key) {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
         start(p, EARLY);
     }
