@@ -975,12 +975,17 @@ fn mapped_blocks(start: usize, end: usize) -> u64 {
 /// slots whose texture is away, which are asked again and again).
 pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
     use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
-    if len == 0 {
-        return 0;
-    }
     let start = at as usize;
     let end = start.saturating_add(len);
-    if !committed(at, 1) && !committed((end - 1) as *const u8, 1) {
+    if start == end {
+        return 0;
+    }
+    // Streaming can commit only interior mip pages while both ends of the
+    // texture remain reserved. The old endpoint shortcut treated that valid
+    // state as wholly absent and repeatedly skipped the texture.
+    let ends_missing =
+        !committed(at, 1) && !committed((end - 1) as *const u8, 1);
+    if ends_missing && (end - 1) / 4096 - start / 4096 <= 1 {
         return 0;
     }
     if !by_query() {
