@@ -353,13 +353,11 @@ fn drained() {
 mod tests {
     use super::*;
 
-    /// The mesh path waits on the worker notification rather than
-    /// returning while the pipeline is still pending.
+    /// Mesh first use creates the pipeline before returning to the caller.
     #[test]
-    fn wait_made_observes_worker_completion() {
+    fn mesh_first_use_is_made_before_dispatch() {
         let p = Arc::new(Pending::new(Vec::new(), None));
-        start(&p, REQUESTED);
-        wait_made(&p);
+        assert!(!now(&p));
         assert!(matches!(p.made.get(), Some(None)));
     }
 
