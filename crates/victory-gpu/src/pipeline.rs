@@ -452,16 +452,17 @@ pub(crate) fn is_skipped(this: This) -> bool {
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn note_drop(this: This) {
     let why = if this.is_null() {
-        Some("no pipeline set".to_owned())
+        "no pipeline set".to_owned()
     } else {
         let p = pipeline(this);
         skipped_shader(p)
             .map(|hash| format!("skipped shader {hash}"))
             .or_else(|| make::missing(&p.host))
+            .unwrap_or_else(|| {
+                "host pipeline unavailable without a recorded pending or failure state".to_owned()
+            })
     };
-    if let Some(why) = why {
-        note_why(why);
-    }
+    note_why(why);
 }
 
 /// Counts a draw or dispatch dropped for `why` (diagnostics).
