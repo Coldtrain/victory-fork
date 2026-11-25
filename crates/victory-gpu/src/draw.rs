@@ -324,6 +324,9 @@ pub(crate) static HEAP_VIEWS_ELSEWHERE: AtomicU64 = AtomicU64::new(0);
 /// index ([`State::heap_buffers`]), and the microseconds they took.
 pub(crate) static HEAP_BUFFER_PASSES: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
+/// Time in microseconds spent in each part of the indexed-buffer heap pass:
+/// [slot mirroring, span aggregation, buffer refresh, indexed texture uploads].
+pub(crate) static HEAP_BUFFER_PHASES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Textures brought up to date for shaders that pick them by index
 /// ([`State::heap_textures`]), the bytes of their memory, and the slots
 /// still waiting.
@@ -1322,6 +1325,7 @@ impl State {
         type Ranges = std::collections::HashMap<u32, (std::sync::Arc<crate::shadow::Shadow>, u64, u64)>;
         static RANGES: std::sync::Mutex<Option<std::collections::HashMap<usize, (u64, Ranges)>>> =
             std::sync::Mutex::new(None);
+        let mut phase = std::time::Instant::now();
         let mut kept = RANGES.lock().unwrap_or_else(|e| e.into_inner());
         let (passes, ranges) = kept
             .get_or_insert_with(Default::default)
@@ -1384,7 +1388,11 @@ impl State {
             span.2 = span.2.max(*to);
         }
         drop(kept);
+        HEAP_BUFFER_PHASES[0].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
+        phase = std::time::Instant::now();
         let bytes: u64 = spans.values().map(|s| s.2 - s.1).sum();
+        HEAP_BUFFER_PHASES[1].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
+        phase = std::time::Instant::now();
         // Memory that is not write-watched is copied whole by every refresh.
         // It was once refreshed only every 120 frames (unmapped pages read
         // one by one cost 14 GB a frame in run 11, before they were
@@ -1417,7 +1425,10 @@ impl State {
             }
             shadow.refresh(list, *from, to - from);
         }
+        HEAP_BUFFER_PHASES[2].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
+        phase = std::time::Instant::now();
         self.heap_textures(list, heap, host);
+        HEAP_BUFFER_PHASES[3].fetch_add(phase.elapsed().as_micros() as u64, Ordering::Relaxed);
         HEAP_BUFFER_PASSES.fetch_add(1, Ordering::Relaxed);
         HEAP_BUFFER_MICROS.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         static LOGGED: AtomicU64 = AtomicU64::new(0);
