@@ -740,16 +740,63 @@ pub struct StartupProgress {
     pub discovery_complete: bool,
 }
 
-/// The title has presented its first frame: its initial pipeline discovery
-/// phase has reached the point at which the loading UI may wait for the
-/// discovered work to drain. Later gameplay can still discover new PSOs.
+/// The first host present is held until every pipeline description the
+/// title created before that point has finished its background compilation.
+#[cfg(windows)]
+static STARTUP_GATE_ENTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(windows)]
 static STARTUP_PRESENTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-
 #[cfg(windows)]
-pub(crate) fn startup_presented() {
-    STARTUP_PRESENTED.store(true, std::sync::atomic::Ordering::Release);
+static STARTUP_BYPASS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Called by the loading UI when the user presses Enter.
+#[cfg(windows)]
+pub fn bypass_startup_wait() {
+    STARTUP_BYPASS.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Called synchronously before the first frame can be presented. The title
+/// has already created the pipelines needed to record that frame; hold the
+/// frame while their workers finish. This is deliberately a first-frame
+/// barrier, not a claim that future levels' unseen PSO variants are known.
+#[cfg(windows)]
+pub(crate) fn startup_wait_before_present() {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    if STARTUP_GATE_ENTERED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    STARTUP_PRESENTED.store(true, Ordering::Release);
+
+    if std::env::var_os("VICTORY_PIPELINE_PRECOMPILE").is_some_and(|v| v == "0") {
+        tracing::warn!("startup pipeline barrier disabled with VICTORY_PIPELINE_PRECOMPILE=0");
+        return;
+    }
+
+    let mut last_discovered = make::DISCOVERED.load(Ordering::Acquire);
+    let mut quiet_since = Instant::now();
+    loop {
+        if STARTUP_BYPASS.load(Ordering::Acquire) {
+            tracing::warn!("startup pipeline compilation wait bypassed by user");
+            return;
+        }
+        let discovered = make::DISCOVERED.load(Ordering::Acquire);
+        if discovered != last_discovered {
+            last_discovered = discovered;
+            quiet_since = Instant::now();
+        }
+        let completed = make::COMPLETED.load(Ordering::Acquire);
+        let queued = make::waiting();
+        if completed >= discovered && queued == 0 && quiet_since.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(discovered, completed, "initial pipeline batch compiled before first present");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Current shader and pipeline preparation counters.
