@@ -4000,7 +4000,7 @@ impl<'a> Lower<'a> {
     // the host the unused vertex and primitive slots. Pass the program's own
     // counts if that shows in frame time.
     fn mesh_prologue(&mut self, mut mesh: super::shader::Mesh) -> Result<(), Why> {
-        let threads = self.s.threads.expect("mesh")[0];
+        let threads = self.s.threads.expect("mesh").into_iter().product::<u32>();
         if mesh.topology != 2 {
             return Err("a mesh shader not drawing triangles");
         }
@@ -10327,7 +10327,7 @@ impl<'a> Lower<'a> {
             } else {
                 0
             };
-            let threads = self.s.threads.map(|t| t[0]).unwrap_or(u32::MAX);
+            let threads = self.s.threads.map(|t| t.into_iter().product()).unwrap_or(u32::MAX);
             let mesh_guard = if limit > 0 && threads > limit {
                 let lim = self.s.m.i32(limit);
                 let in_bounds = self.s.m.cmp(self.cur, pred::IULT, flat, lim);
@@ -10428,7 +10428,7 @@ impl<'a> Lower<'a> {
         // host would read a vertex nothing set, at any position.
         let written = self.s.mesh.map(|m| {
             m.max_vertices
-                .min(self.s.threads.map_or(u32::MAX, |t| t[0]))
+                .min(self.s.threads.map_or(u32::MAX, |t| t.into_iter().product()))
         });
         let mut indices = [z; 3];
         for (k, slot) in indices.iter_mut().enumerate() {
