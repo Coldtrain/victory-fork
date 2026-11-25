@@ -3177,6 +3177,52 @@ mod window_tests {
     }
 }
 
+/// Verifies that persistent shadow-buffer states follow submission order.
+#[cfg(test)]
+mod buffer_state_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn buffer_states_follow_submission_order_and_combine_reads() {
+        let Some(host) = host() else { return };
+        let Some((buffer, data)) = host.shared_buffer(256) else {
+            return;
+        };
+        // SAFETY: a live buffer.
+        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+        let shadow = Arc::new(Shadow::new(buffer, data, gpu, 0, 256));
+
+        let write = host.new_list().unwrap();
+        write.buffer_state(&shadow, crate::host::BUFFER_UNORDERED_ACCESS);
+        write.close();
+        host.execute(&[&write]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_UNORDERED_ACCESS
+        );
+
+        let read = host.new_list().unwrap();
+        read.buffer_state(&shadow, crate::host::BUFFER_VERTEX);
+        read.buffer_state(&shadow, crate::host::BUFFER_SHADER_RESOURCE);
+        read.close();
+        host.execute(&[&read]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_VERTEX | crate::host::BUFFER_SHADER_RESOURCE
+        );
+
+        let next_write = host.new_list().unwrap();
+        next_write.buffer_state(&shadow, crate::host::BUFFER_UNORDERED_ACCESS);
+        next_write.close();
+        host.execute(&[&next_write]);
+        assert_eq!(
+            shadow.state.load(Ordering::Relaxed),
+            crate::host::BUFFER_UNORDERED_ACCESS
+        );
+    }
+}
+
 /// For device-removed reports: the copy of title memory whose host range
 /// starts closest below host GPU address `va`, and where `va` is in it.
 pub(crate) fn near(va: u64) -> String {
