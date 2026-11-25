@@ -1877,24 +1877,32 @@ impl State {
         }
     }
 
-    /// Runs a mesh dispatch with the exact group dimensions supplied by the title.
+    /// Runs a mesh dispatch. The title's mesh programs are one-dimensional:
+    /// meshlet IDs are taken from the x group only, so y/z are normalized.
     pub(crate) fn dispatch_mesh(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
         self.window = None;
+        if y != 1 || z != 1 {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    x, y, z,
+                    "title issued a non-one-dimensional mesh dispatch; using DispatchMesh(x, 1, 1)"
+                );
+            });
+        }
         #[cfg(feature = "diagnostics")]
-        self.trace("mesh", x, y);
+        self.trace("mesh", x, 0);
         let ran = x != 0
-            && y != 0
-            && z != 0
             && mesh_test() != 1
             && mesh_kept(self.pipeline)
             && self.prepare_for(list, false, true)
             && match list.list.cast::<ID3D12GraphicsCommandList6>() {
                 Ok(l6) => {
                     #[cfg(feature = "diagnostics")]
-                    list.note_op(|| self.op_text(format!("mesh {x}x{y}x{z}"), false));
+                    list.note_op(|| self.op_text(format!("mesh {x} (title {x}x{y}x{z})"), false));
                     self.mesh_scissor(list, true);
                     // SAFETY: an open list with everything set.
-                    unsafe { l6.DispatchMesh(x, y, z) };
+                    unsafe { l6.DispatchMesh(x, 1, 1) };
                     self.mesh_scissor(list, false);
                     DRAWN.fetch_add(1, Ordering::Relaxed);
                     true
