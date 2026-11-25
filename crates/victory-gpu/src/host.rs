@@ -1793,7 +1793,7 @@ static QUEUE_ORDER: Mutex<u64> = Mutex::new(0);
 /// ([`relay`]): landings, flights landed, microseconds it waited for the
 /// card with nothing to land, microseconds it waited for fetches of card
 /// copies' pieces, microseconds of landing in all.
-static RELAY_STATS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+static RELAY_STATS: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 
 /// Of the line's things in order (a flight: the value signalled on the
 /// host's fence behind it; a write or a signal behind a flight: `None`):
@@ -2492,12 +2492,13 @@ fn late_line(frames: f64) {
         tracing::info!(
             "the relay per frame (VICTORY_RELAY=1): {:.1} flights landed in {:.1} landings by the thread that copies back, \
              beside the submitting thread; that thread waited {:.1} ms for the card with nothing to land and {:.1} ms for \
-             fetches of card copies' pieces, and was {:.1} ms landing in all (the frame line's \"copying back\" is its time; \
+             fetches of card copies' pieces, spent {:.1} ms merging fetched bytes, and was {:.1} ms landing in all (the frame line's \"copying back\" is its time; \
              \"settles\" above are waits of other threads for it)",
             r[1],
             r[0],
             r[2] / 1000.0,
             r[3] / 1000.0,
+            r[5] / 1000.0,
             r[4] / 1000.0,
         );
     }
@@ -3331,14 +3332,17 @@ impl Host {
             CARD_STATS[5].fetch_add(1, Ordering::Relaxed);
             CARD_STATS[6].fetch_add(us, Ordering::Relaxed);
         }
+        let merging = std::time::Instant::now();
         let mut title = Vec::new();
+        let mut skip = Vec::new();
         let mut written = 0;
         for (shadow, lo, hi, at) in &pieces {
             // SAFETY: the mapping of the fetched bytes, `total` of them;
             // the copy into it has run.
             let gpu = unsafe { std::slice::from_raw_parts((data + *at as usize) as *const u8, hi - lo) };
-            written += shadow.card_merge_relay(*lo, gpu, after, &mut title);
+            written += shadow.card_merge_relay(*lo, gpu, after, &mut title, &mut skip);
         }
+        RELAY_STATS[5].fetch_add(merging.elapsed().as_micros() as u64, Ordering::Relaxed);
         COPY_BACK[1].fetch_add(written as u64, Ordering::Relaxed);
         // Sends up to `after` are of no use to any later merge.
         crate::shadow::relay_fetched(after);
@@ -5716,6 +5720,16 @@ impl Meter {
         let picked = crate::draw::HEAP_BUFFER_PASSES.swap(0, Ordering::Relaxed) as f64 / frames;
         let picked_ms =
             crate::draw::HEAP_BUFFER_MICROS.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames;
+        let heap_phases: Vec<f64> = crate::draw::HEAP_BUFFER_PHASES
+            .iter()
+            .map(|phase| phase.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames)
+            .collect();
+        if picked > 0.0 {
+            tracing::info!(
+                "indexed heap preparation per frame: {:.1} ms descriptor-slot mirroring, {:.1} ms span aggregation, {:.1} ms buffer refreshes, {:.1} ms indexed-texture uploads",
+                heap_phases[0], heap_phases[1], heap_phases[2], heap_phases[3]
+            );
+        }
         // Copies between depth textures and their colour twins, each way.
         let [twin_to_depth, twin_to_colour] =
             [2, 3].map(|i| crate::resource::TWINS[i].swap(0, Ordering::Relaxed) as f64 / frames);
