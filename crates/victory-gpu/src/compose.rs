@@ -32,19 +32,6 @@ float4 ps(V v) : SV_Target {
     float4 o = over.SampleLevel(smooth_, v.uv, 0);
     return float4(saturate(o.rgb + s.rgb * (1 - saturate(o.a))), 1);
 }
-[RootSignature(RS)]
-float4 ps_scene(V v) : SV_Target {
-    return float4(scene.SampleLevel(smooth_, v.uv, 0).rgb, 1);
-}
-[RootSignature(RS)]
-float4 ps_overlay(V v) : SV_Target {
-    return float4(over.SampleLevel(smooth_, v.uv, 0).rgb, 1);
-}
-[RootSignature(RS)]
-float4 ps_alpha(V v) : SV_Target {
-    float a = over.SampleLevel(smooth_, v.uv, 0).a;
-    return float4(a, a, a, 1);
-}
 "#;
 
 /// Whether a second presented plane is composed over the first
@@ -91,17 +78,9 @@ fn compile(entry: PCSTR, target: PCSTR) -> windows::core::Result<ID3DBlob> {
 
 impl Composer {
     pub(crate) fn new(host: &Host, format: DXGI_FORMAT) -> windows::core::Result<Self> {
-        let mode = std::env::var("VICTORY_PLANES_VIEW").unwrap_or_default();
-        let entry = match mode.as_str() {
-            "scene" => s!("ps_scene"),
-            "overlay" => s!("ps_overlay"),
-            "alpha" => s!("ps_alpha"),
-            _ => s!("ps"),
-        };
-        tracing::info!(mode = %if mode.is_empty() { "composite" } else { mode.as_str() }, "display plane diagnostic view");
         let (vs, ps) = (
             compile(s!("vs"), s!("vs_5_1"))?,
-            compile(entry, s!("ps_5_1"))?,
+            compile(s!("ps"), s!("ps_5_1"))?,
         );
         // SAFETY: the blobs' own bytes, alive through the calls.
         unsafe {

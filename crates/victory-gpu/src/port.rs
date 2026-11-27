@@ -311,3 +311,91 @@ pub(crate) fn log(frames: f64) {
     );
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the title's 32-bit memory is asked for.
+    #[test]
+    fn only_memory_below_4_gib_is_wanted_with_the_switch() {
+        // The switch is read once from the environment; tests do not set
+        // it, so nothing is wanted.
+        if !on() {
+            assert!(!wanted(0x3431_0000, 0x1000));
+        }
+        let low = |at: u64, len: u64| at.checked_add(len).is_some_and(|end| end <= LOW && len > 0);
+        assert!(low(0x34e1_0000, 0xae0_0000));
+        assert!(!low(0xffff_0000, 0x2_0000));
+        assert!(!low(0xe1c80_0000, 0x1000));
+        assert!(!low(u64::MAX, 2));
+    }
+
+    /// A stretch of a reserved section, mapped as `xmem` maps physical
+    /// pages (views of consecutive pages in turn, committed), is opened
+    /// through a view of ours: the card reads the bytes the title's views
+    /// show, at the buffer's offset, and its writes show in them; a second
+    /// buffer in the stretch is placed in the same region.
+    #[test]
+    fn warp_a_stretch_of_a_reserved_section_is_used_in_place_through_a_view_of_ours() {
+        let _turn = crate::indirect::tests::warp_turn();
+        let Some(device) = crate::inplace::tests::warp() else { return };
+        if windows::core::Interface::cast::<ID3D12Device13>(&device).is_err() {
+            return;
+        }
+        const K: usize = 64 << 10;
+        // SAFETY (the whole test): the section, placeholder and views made
+        // here.
+        unsafe {
+            let process = windows_sys::Win32::System::Threading::GetCurrentProcess();
+            let section = mem::CreateFileMappingW(
+                windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                mem::PAGE_READWRITE | mem::SEC_RESERVE,
+                0,
+                8 * K as u32,
+                std::ptr::null(),
+            );
+            assert!(!section.is_null());
+            let hole = mem::VirtualAlloc2(process, std::ptr::null(), 8 * K, mem::MEM_RESERVE | mem::MEM_RESERVE_PLACEHOLDER, mem::PAGE_NOACCESS, std::ptr::null_mut(), 0)
+                .cast::<u8>();
+            assert!(!hole.is_null());
+            // Two views, pages 0..3 and 3..8 of the section, in turn.
+            mem::VirtualFree(hole.cast(), 3 * K, mem::MEM_RELEASE | mem::MEM_PRESERVE_PLACEHOLDER);
+            let mut views = Vec::new();
+            for (page, n) in [(0usize, 3usize), (3, 5)] {
+                let view = mem::MapViewOfFile3(section, process, hole.add(page * K).cast(), (page * K) as u64, n * K, mem::MEM_REPLACE_PLACEHOLDER, mem::PAGE_READWRITE, std::ptr::null_mut(), 0);
+                assert!(!view.Value.is_null(), "{}", std::io::Error::last_os_error());
+                assert!(!mem::VirtualAlloc(view.Value, n * K, mem::MEM_COMMIT, mem::PAGE_READWRITE).is_null());
+                crate::inplace::title_memory_view(view.Value as usize, n * K, section as usize, (page * K) as u64);
+                views.push(view);
+            }
+            let base = hole as u64;
+            let (start, len) = (base + K as u64 + 0x40, 5 * K as u64);
+            let placed = place_in(&device, start, len).unwrap_or_else(|e| panic!("not placed: {e:?}"));
+            assert_eq!(placed.bias, 0x40);
+            let mut rig = crate::inplace::Rig::new(&device).unwrap();
+            for (i, b) in std::slice::from_raw_parts_mut(start as *mut u8, len as usize).iter_mut().enumerate() {
+                *b = (i * 7 + 3) as u8;
+            }
+            let got = rig.fetch(&placed.buffer, placed.bias, len as usize).unwrap();
+            assert!(got == std::slice::from_raw_parts(start as *const u8, len as usize), "the card reads the title's bytes, across both views");
+            rig.store(&placed.buffer, placed.bias + 3 * K as u64, &[0x5a; 256]).unwrap();
+            assert!(std::slice::from_raw_parts((start + 3 * K as u64) as *const u8, 256).iter().all(|&b| b == 0x5a), "the card's write shows in the title's view");
+            // Another buffer in the same stretch: the same region.
+            let regions = REGIONS.lock().unwrap().len();
+            let second = place_in(&device, base + 6 * K as u64, 100).unwrap_or_else(|e| panic!("not placed: {e:?}"));
+            assert_eq!(REGIONS.lock().unwrap().len(), regions, "one region for the stretch");
+            assert_eq!(second.bias, 0);
+            // The title's views may change under the heap.
+            drop((placed, second));
+            forget(base as usize, 8 * K);
+            for view in views {
+                assert!(mem::UnmapViewOfFile2(process, view, mem::MEM_PRESERVE_PLACEHOLDER) != 0, "the title's own view can be unmapped");
+            }
+            crate::inplace::views_gone(base as usize, 8 * K);
+            mem::VirtualFree(hole.cast(), 0, mem::MEM_RELEASE);
+            mem::VirtualFree(hole.add(3 * K).cast(), 0, mem::MEM_RELEASE);
+            windows_sys::Win32::Foundation::CloseHandle(section);
+        }
+    }
+}

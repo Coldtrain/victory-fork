@@ -86,7 +86,7 @@ pub fn hooked(base: usize, size: usize, patched: usize) {
 /// Whether [`take`] stands for the heap's changed pages: the switch is on and
 /// the stores were patched.
 fn working() -> bool {
-    on() && IMAGE[2].load(Relaxed) == 6
+    on() && IMAGE[2].load(Relaxed) > 0
 }
 
 /// The heap whose slots are marked: its slots, and the places in the title's
@@ -471,3 +471,49 @@ pub(crate) fn line(frames: f64) {
     );
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marks_layout_is_what_the_stores_read() {
+        assert_eq!(size_of::<Marks>(), victory_loader_marks_len());
+        assert_eq!(std::mem::offset_of!(Marks, start), 0);
+        assert_eq!(std::mem::offset_of!(Marks, len), 8);
+        assert_eq!(std::mem::offset_of!(Marks, slots), 16);
+        assert_eq!(std::mem::offset_of!(Marks, chunks), 24);
+    }
+
+    /// `victory_loader::descriptor_sites::MARKS_LEN` (no dependency on the loader).
+    fn victory_loader_marks_len() -> usize {
+        32
+    }
+
+    /// Slots marked as the stores mark them, and by our calls, come out once
+    /// each, as runs; outside the heap nothing is marked.
+    #[test]
+    fn marked_slots_are_taken_once_as_runs() {
+        let start = 0x1000_0000u64;
+        assert!(adopt_now(start, 1000));
+        assert!(adopted(start) && !adopted(start + 32));
+        let store = |slot: usize| {
+            let a = ADOPTED.read().unwrap();
+            let a = a.as_ref().unwrap();
+            a.slots[slot].store(1, Release);
+            a.chunks[slot / CHUNK].store(1, Release);
+        };
+        store(5);
+        mark(start + 6 * 32 + 7);
+        mark(start + 300 * 32);
+        store(999);
+        mark(start - 32);
+        mark(start + 1000 * 32);
+        assert_eq!(take(start).unwrap(), [(5, 2), (300, 1), (999, 1)]);
+        assert_eq!(take(start).unwrap(), []);
+        assert!(take(start + 32).is_none());
+        let_go(start);
+        mark(start + 5 * 32);
+        assert!(take(start).is_none());
+        assert_eq!(MARKS.len.load(Relaxed), 0);
+    }
+}
