@@ -13,19 +13,23 @@ if (!(Test-Path -LiteralPath $victory -PathType Leaf)) { throw "Build first: $vi
 $game = (Resolve-Path -LiteralPath $Exe).Path
 $settings = @{
     VICTORY_RELAY = $Relay
-    VICTORY_LATE_WAIT = '2'
+    VICTORY_LATE_WAIT = '3'
     VICTORY_LATE_WAIT_WRITES = '0'
-    VICTORY_LATE_WAIT_LISTS = '128'
+    VICTORY_LATE_WAIT_LISTS = '32'
     VICTORY_WIDE_BACK = '1'
+    VICTORY_TEXTURE_NO_WAIT = '0'
+    VICTORY_KEEP_SNAPSHOTS = '0'
     VICTORY_CARD_BUFFERS_MIN_MB = '1'
     VICTORY_CARD_BUFFERS_MB = '1024'
     VICTORY_LOG = 'warn,victory_gpu=info,victory_loader=info'
 }
 if ($Relay -eq '0') { $settings.VICTORY_LATE_WAIT = '0' }
 $port = if ($Baseline) { '0' } else { '1' }
-foreach ($name in @('CONSTANTS','DESCRIPTORS','CBV','GUARD','JOURNAL')) {
+foreach ($name in @('CONSTANTS','DESCRIPTORS','GUARD','JOURNAL')) {
     $settings["VICTORY_PORT_$name"] = $port
 }
+$settings.VICTORY_PORT_CBV = '0'
+$settings.VICTORY_PORT_CBV_PLACE = '0'
 foreach ($name in $More.Keys) { $settings[$name] = [string]$More[$name] }
 $before = @{}
 $keep = @('VICTORY_CONFIG','VICTORY_GAME_DIR','VICTORY_CACHE_DIR','VICTORY_DATA_DIR')
