@@ -59,6 +59,8 @@ pub(crate) struct Heap {
     host: std::sync::OnceLock<Option<host::HostHeap>>,
     #[cfg(windows)]
     pending: std::sync::Mutex<Vec<u32>>,
+    #[cfg(windows)]
+    indexed_sync: std::sync::Mutex<IndexedSync>,
 }
 
 pub(crate) fn heap<'a>(this: This) -> &'a Heap {
@@ -66,7 +68,111 @@ pub(crate) fn heap<'a>(this: This) -> &'a Heap {
     unsafe { &*this.cast::<Heap>() }
 }
 
+#[cfg(windows)]
+#[derive(Default)]
+struct IndexedSync {
+    frame: Option<u64>,
+    asked: u64,
+    // Only view records, not unrelated data allocated in the same title heap.
+    seen: std::collections::HashMap<u32, [u32; 3]>,
+}
+
 impl Heap {
+    /// Refresh records written directly by the title before the indexed
+    /// buffer/texture pass consumes the dirty-slot sets. Port of Belobug's
+    /// changed-page synchronization, using this baseline's write journal.
+    #[cfg(windows)]
+    pub(crate) fn sync_indexed(&self, host: &host::HostHeap) {
+        if self.samplers() || self.memory.is_some() { return; }
+        let mut state = self.indexed_sync.lock().unwrap_or_else(|e| e.into_inner());
+        let frame = crate::frame::current();
+        if state.frame == Some(frame) { return; }
+        let first = state.frame.is_none();
+        state.frame = Some(frame);
+        let count = self.desc.count.min(host.count());
+        let start = self.start as usize;
+        let end = start.saturating_add(count as usize * 32);
+        if start >= end { return; }
+        let mut ranges = Vec::new();
+        // Fast path: direct store marks, where all hooks could be installed.
+        for (at, n) in crate::port_descriptors::take(self.start).unwrap_or_default() {
+            let from = start + at as usize * 32;
+            let to = (from + n as usize * 32).min(end);
+            if from < to { ranges.push((from, to)); }
+        }
+        // Keep the dirty-page fallback active for correctness, including
+        // unhooked memcpy/inline writers. Scan all pages on first use.
+        let old = state.asked;
+        let watched = crate::watch::writes(start, end, true);
+        if let Some((now, pages)) = watched {
+            state.asked = now;
+            if !first {
+                for (page, written) in pages {
+                    if written > old {
+                        let from = (page * crate::watch::PAGE).max(start);
+                        let to = ((page + 1) * crate::watch::PAGE).min(end);
+                        if from < to { ranges.push((from, to)); }
+                    }
+                }
+            }
+        } else {
+            state.asked = 0;
+        }
+        if first || old == 0 || state.asked == 0 {
+            for page in start / crate::watch::PAGE..end.div_ceil(crate::watch::PAGE) {
+                ranges.push(((page * crate::watch::PAGE).max(start), ((page + 1) * crate::watch::PAGE).min(end)));
+            }
+        }
+        ranges.sort_unstable();
+        let mut joined: Vec<(usize, usize)> = Vec::new();
+        for (from, to) in ranges {
+            if let Some(last) = joined.last_mut() {
+                if from <= last.1 && to <= (last.0 / crate::watch::PAGE + 1) * crate::watch::PAGE {
+                    last.1 = last.1.max(to);
+                    continue;
+                }
+            }
+            joined.push((from, to));
+        }
+        let mut changed = 0usize;
+        let mut bytes = Vec::new();
+        for (from, to) in joined {
+            let mut at = start + (from - start).div_ceil(32) * 32;
+            while at + 32 <= to {
+                let stop = to.min((at / crate::watch::PAGE + 1) * crate::watch::PAGE);
+                let n = (stop - at) / 32;
+                if n == 0 { break; }
+                bytes.resize(n * 32, 0);
+                // Read through the kernel so an unmapped title page cannot
+                // fault the renderer. Retry failed reads on the next frame.
+                if !crate::host::read_into(at as *const u8, &mut bytes) {
+                    state.asked = 0;
+                    at += n * 32;
+                    continue;
+                }
+                for (offset, record) in bytes.chunks_exact(32).enumerate() {
+                    let index = ((at - start) / 32 + offset) as u32;
+                    let words: [u32; 3] = std::array::from_fn(|i| {
+                        u32::from_le_bytes(record[i * 4..i * 4 + 4].try_into().unwrap())
+                    });
+                    let different = if words[0] == VIEW_TAG {
+                        state.seen.insert(index, words) != Some(words)
+                    } else {
+                        state.seen.remove(&index).is_some()
+                    };
+                    if different {
+                        host.mirror_record(index, self.start + u64::from(index) * 32, false, words);
+                        changed += 1;
+                    }
+                }
+                at += n * 32;
+            }
+        }
+        if first {
+            tracing::info!(frame, changed, count, "indexed descriptor heap: initial direct-write synchronization");
+        }
+    }
+
     /// Whether this is a sampler heap.
     pub(crate) fn samplers(&self) -> bool {
         self.desc.kind == SAMPLERS
@@ -151,25 +257,6 @@ fn mirror(handle: u64) {
             drop(pending);
             if let Some(host) = host {
                 host.mirror(index, handle, false);
-            }
-        }
-    }
-}
-
-/// Publish the marked records only at a quiescent submission boundary.
-#[cfg(windows)]
-pub(crate) fn publish_marked() {
-    if !crate::port_descriptors::on() { return; }
-    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
-    for &(start, _, ptr) in heaps.iter() {
-        if !crate::port_descriptors::adopted(start) { continue; }
-        // The heap remains registered and live under SHADER_HEAPS.
-        let heap = unsafe { &*(ptr as *const Heap) };
-        let Some(Some(host)) = heap.host.get() else { continue; };
-        let Some(runs) = crate::port_descriptors::take(start) else { continue; };
-        for (first, count) in runs {
-            for index in first..first + count {
-                host.mirror(index, start + u64::from(index) * 32, false);
             }
         }
     }
@@ -967,6 +1054,8 @@ pub(crate) extern "system" fn create_heap(
         host: std::sync::OnceLock::new(),
         #[cfg(windows)]
         pending: Default::default(),
+        #[cfg(windows)]
+        indexed_sync: Default::default(),
     });
     #[cfg(windows)]
     if visible {
