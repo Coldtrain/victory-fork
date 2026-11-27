@@ -5940,7 +5940,6 @@ impl Host {
                         frame,
                         "the swap chain's buffers were made again for another size or format"
                     );
-                    self.log_video_memory("right after the swap chain's buffers were made again");
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, width, height, "swap chain not resized");
