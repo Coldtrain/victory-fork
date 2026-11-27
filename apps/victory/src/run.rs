@@ -102,6 +102,15 @@ pub fn run(
     }
     let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
     show(&exe_name, image.bind_imports(&with_dlls, policy)?);
+    #[cfg(windows)]
+    if execute && victory_hle::port_descriptors::on() {
+        use victory_loader::descriptor_sites::{Hooked, SITES, apply};
+        let size = image.info().size_of_image as usize;
+        let done = unsafe { apply(image.base(), size, victory_hle::port_descriptors::marks_address(), &SITES) };
+        let patched = done.iter().filter(|d| **d == Hooked::Done).count();
+        println!("renderer port 2: {patched} of {} descriptor record stores patched", SITES.len());
+        victory_hle::port_descriptors::hooked(image.base(), size, patched);
+    }
     if !execute {
         println!("not executing (pass --execute to start the title)");
         return Ok(());
