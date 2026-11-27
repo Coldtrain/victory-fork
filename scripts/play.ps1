@@ -37,8 +37,14 @@ try {
         $before[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
         [Environment]::SetEnvironmentVariable($name, $settings[$name], 'Process')
     }
-    & $victory run $game --execute --console $Console 2>&1 | Tee-Object -FilePath (Join-Path $root 'victory-run.log')
-    if ($LASTEXITCODE -ne 0) { throw "Victory exited with code $LASTEXITCODE" }
+    # Rust tracing writes ordinary INFO messages to stderr. Keep the native
+    # streams separate so Windows PowerShell does not turn them into exceptions.
+    $stdout = Join-Path $root 'victory-run.log'
+    $stderr = Join-Path $root 'victory-errors.log'
+    Write-Host "Starting Victory. Logs: $stdout and $stderr"
+    $arguments = @('run', ('"' + $game + '"'), '--execute', '--console', $Console)
+    $process = Start-Process -FilePath $victory -ArgumentList $arguments -WorkingDirectory $root -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -Wait
+    if ($process.ExitCode -ne 0) { throw "Victory exited with code $($process.ExitCode). See $stderr" }
 } finally {
     foreach ($name in $before.Keys) { [Environment]::SetEnvironmentVariable($name, $before[$name], 'Process') }
     Pop-Location
