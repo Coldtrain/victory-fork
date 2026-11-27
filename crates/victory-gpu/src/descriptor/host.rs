@@ -1254,7 +1254,13 @@ impl HostHeap {
             return None;
         }
         // SAFETY: the handle is a descriptor slot in title memory.
-        let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        let words = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        self.mirror_record(index, handle, for_draw, words)
+    }
+
+    /// Publish a safely copied title descriptor, without rereading its memory.
+    pub(crate) fn mirror_record(&self, index: u32, handle: u64, for_draw: bool, [tag, i, generation]: [u32; 3]) -> Option<View> {
+        if index >= self.count { return None; }
         // Generations start at 1, so a made slot's key is never 0.
         let key = u64::from(generation) << 32 | u64::from(i);
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
