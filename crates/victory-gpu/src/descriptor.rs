@@ -140,6 +140,7 @@ fn shader_slot<'a>(handle: u64) -> Option<(&'a Heap, u32)> {
 /// is in a shader-visible heap.
 #[cfg(windows)]
 fn mirror(handle: u64) {
+    crate::port_descriptors::mark(handle);
     let Some((heap, index)) = shader_slot(handle) else {
         return;
     };
@@ -150,6 +151,25 @@ fn mirror(handle: u64) {
             drop(pending);
             if let Some(host) = host {
                 host.mirror(index, handle, false);
+            }
+        }
+    }
+}
+
+/// Publish the marked records only at a quiescent submission boundary.
+#[cfg(windows)]
+pub(crate) fn publish_marked() {
+    if !crate::port_descriptors::on() { return; }
+    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    for &(start, _, ptr) in heaps.iter() {
+        if !crate::port_descriptors::adopted(start) { continue; }
+        // The heap remains registered and live under SHADER_HEAPS.
+        let heap = unsafe { &*(ptr as *const Heap) };
+        let Some(Some(host)) = heap.host.get() else { continue; };
+        let Some(runs) = crate::port_descriptors::take(start) else { continue; };
+        for (first, count) in runs {
+            for index in first..first + count {
+                host.mirror(index, start + u64::from(index) * 32, false);
             }
         }
     }
@@ -171,6 +191,7 @@ pub(crate) fn release_dynamic(heap: usize, first: u32, n: u32) {
 #[cfg(windows)]
 impl Drop for Heap {
     fn drop(&mut self) {
+        crate::port_descriptors::let_go(self.start);
         let at = std::ptr::from_ref::<Heap>(self) as usize;
         let mut heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
         heaps.retain(|&(_, _, h)| h != at);
@@ -952,6 +973,7 @@ pub(crate) extern "system" fn create_heap(
         let at = std::ptr::from_ref::<Heap>(&heap) as usize;
         let mut heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
         heaps.push((start, start + size, at));
+        if placed && desc.kind == VIEWS_KIND { crate::port_descriptors::adopt(start, desc.count); }
     }
     #[cfg(not(windows))]
     let _ = visible;
