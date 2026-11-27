@@ -6179,16 +6179,8 @@ impl Host {
                 stage.next("landing: copies in the PC's memory");
                 hand_back.merge();
                 relay_trace(|| format!("landing merge end elapsed_us={}", landing.elapsed().as_micros()));
-                stage.next("landing: ranges done with");
-                let finishing = std::time::Instant::now();
-                // Only now, and flight by flight: a range another flight
-                // in the air declared too stays closed to refreshes.
-                for flight in &flights {
-                    for (shadow, ranges) in &flight.back {
-                        shadow.copy_back_done(ranges);
-                    }
-                }
-                crate::land::spent(crate::land::stat::DONE, finishing);
+                // Keep every flight's pending ranges until the line publishes
+                // its landing. Merging ranges above is only for the copy work.
                 COPY_BACK[0].fetch_add(landing.elapsed().as_micros() as u64, Ordering::Relaxed);
                 RELAY_STATS[0].fetch_add(1, Ordering::Relaxed);
                 RELAY_STATS[1].fetch_add(flights.len() as u64, Ordering::Relaxed);
@@ -6198,6 +6190,7 @@ impl Host {
         stage.next("landing: read-backs, telling the title");
         let mut last = 0;
         let mut landed = Vec::new();
+        let mut backs: Vec<Declared> = Vec::new();
         let mut telling = std::time::Instant::now();
         for item in items {
             telling = match item {
@@ -6213,6 +6206,7 @@ impl Host {
                         own.landed();
                     }
                     landed.push((flight.lists, flight.order));
+                    backs.extend(flight.back);
                     crate::land::spent(crate::land::stat::READ_BACKS, telling)
                 }
                 Late::Write(at, what, bytes) => {
@@ -6268,6 +6262,20 @@ impl Host {
         }
         LINE_MOVED.notify_all();
         LINE_LANDED.notify_all();
+        // VItoriaBr aa85bb0 / 91cd9c9: only now retire the pending
+        // ranges. Never deduplicate declarations across flights.
+        // Our WHY_STALE waiter also predicates on Shadow::writes_pending_in.
+        // Reacquire the line mutex before the second notification so a waiter
+        // cannot miss the transition between its predicate and condvar wait.
+        let finishing = std::time::Instant::now();
+        for (shadow, ranges) in &backs {
+            shadow.copy_back_done(ranges);
+        }
+        {
+            let _line = line();
+            LINE_LANDED.notify_all();
+        }
+        crate::land::spent(crate::land::stat::DONE, finishing);
     }
 
     /// After a submission ran, for copies in the card's memory: the pieces
