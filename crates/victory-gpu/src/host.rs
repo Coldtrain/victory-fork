@@ -3895,6 +3895,7 @@ impl Host {
         let behind = late && flying();
         // The slots that waited for a texture's host copy, before the
         // lists that may read them run.
+        if !behind { crate::descriptor::publish_marked(); }
         crate::descriptor::make_waiting();
         let this_submission = STARTED.fetch_add(1, Ordering::AcqRel) + 1;
         // The ranges shaders write are counted for it (with the relay).
@@ -5656,6 +5657,7 @@ impl Meter {
         }
         let drawn = crate::draw::drawn();
         let frames = f64::from(self.frames);
+        crate::port_descriptors::line(frames);
         let fps = frames / elapsed.as_secs_f64();
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
         let draws = (drawn - self.drawn) as f64 / frames;
