@@ -2224,6 +2224,13 @@ static HEAP_FUNCTIONS: Table<24> = {
 
 /// IUnknown 3, object 4, device child 1, resource 10 (7 as on PC, then 3
 /// console ones).
+#[cfg(windows)]
+pub(crate) fn is_resource(this: This) -> bool {
+    let mut table = [0; size_of::<usize>()];
+    crate::host::read_into(this.cast(), &mut table)
+        && usize::from_ne_bytes(table) == RESOURCE_FUNCTIONS.0.as_ptr() as usize
+}
+
 static RESOURCE_FUNCTIONS: Table<32> = {
     let mut f = object::d3d12_object(object::missing_table::<RESOURCE, 32>());
     f[0] = resource_query as *const ();
