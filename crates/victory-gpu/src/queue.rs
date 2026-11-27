@@ -750,7 +750,63 @@ pub(crate) fn presented() -> u64 {
     FRAMES.load(Ordering::Relaxed)
 }
 
-/// Shows the first plane's first resource in our window.
+/// Retail PresentX adds source-rectangle and destination pointers, a color
+/// space and seven option words after the common prefix. Older callers pass
+/// only the prefix for single-plane presents.
+#[cfg(windows)]
+#[repr(C)]
+struct RetailPlane {
+    prefix: Plane,
+    source_rects: *const (),
+    destination: *const (),
+    color_space: u32,
+    options: [u32; 7],
+}
+#[cfg(windows)]
+const _: () = assert!(size_of::<RetailPlane>() == 72);
+
+/// Whether the second plane of a present is shown over the first
+/// (`VICTORY_PLANES=1`, [`crate::compose::on`]). Says once, either way, that
+/// the title presents more than one plane and what the second one is.
+#[cfg(windows)]
+fn planes_seen(planes: u32, parameters: *const Plane) -> bool {
+    static ONCE: AtomicBool = AtomicBool::new(false);
+    let on = crate::compose::on();
+    if !ONCE.swap(true, Ordering::Relaxed) {
+        let second = overlay_resource(parameters);
+        tracing::info!(
+            planes,
+            second = ?second,
+            second_known = second.is_some_and(|r| crate::resource::host_resource(r).is_some()),
+            composed = on,
+            "the title presents more than one plane (VICTORY_PLANES=1: the second is composed over the first)"
+        );
+    }
+    on
+}
+
+#[cfg(windows)]
+fn overlay_resource(parameters: *const Plane) -> Option<This> {
+    // Read only the second prefix at the 72-byte retail PresentX stride. A
+    // caller using a different layout can still present its base plane safely.
+    let second = parameters.cast::<RetailPlane>().wrapping_add(1).cast::<u8>();
+    let mut prefix = [0; size_of::<Plane>()];
+    if !crate::host::read_into(second, &mut prefix) {
+        return None;
+    }
+    // SAFETY: the prefix has the C layout above and its bytes were copied.
+    let plane = unsafe { prefix.as_ptr().cast::<Plane>().read_unaligned() };
+    let mut pointer = [0; size_of::<This>()];
+    if plane.count == 0
+        || plane.resources.is_null()
+        || !crate::host::read_into(plane.resources.cast(), &mut pointer)
+    {
+        return None;
+    }
+    let resource = usize::from_ne_bytes(pointer) as This;
+    crate::resource::is_resource(resource).then_some(resource)
+}
+/// Shows the first plane and composites the optional second plane.
 ///
 /// shortcut: one plane, no scaling or placement, the source expected in
 /// the common state.
@@ -828,8 +884,20 @@ extern "system" fn present(
         const COPY_SOURCE: u32 = 0x800;
         let state = crate::resource::host_transition(resource, COPY_SOURCE)
             .map_or(COPY_SOURCE, |(_, before)| before);
-        let shown = host.present(texture, state, frame);
+        let overlay = (planes > 1 && planes_seen(planes, plane_parameters))
+            .then(|| overlay_resource(plane_parameters))
+            .flatten()
+            .filter(|&r| r != resource)
+            .and_then(|r| {
+                crate::resource::host_resource(r).map(|tex| {
+                    let st = crate::resource::host_transition(r, COPY_SOURCE)
+                        .map_or(COPY_SOURCE, |(_, before)| before);
+                    (r, tex, st)
+                })
+            });
+        let shown = host.present_planes(texture, state, overlay.as_ref().map(|(_, tex, st)| (*tex, *st)), frame);
         crate::resource::host_transition(resource, state);
+        if let Some((r, _, st)) = overlay { crate::resource::host_transition(r, st); }
         #[cfg(feature = "diagnostics")]
         blinks(frame, resource, state, shown);
         #[cfg(not(feature = "diagnostics"))]
