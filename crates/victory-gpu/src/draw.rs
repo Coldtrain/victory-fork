@@ -848,6 +848,10 @@ impl State {
     /// False if the draw or dispatch must not run: a root SRV it reads
     /// could not be given a view.
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
+        // Port the 14b renderer's early indexed-texture pass. It must run
+        // before binding tables: graphics shaders may sample indexed textures
+        // without declaring the buffer-strides root SRV.
+        self.early_textures(list, p, compute);
         let l = &list.list;
         // Heaps first: a root signature with directly indexed heaps must be
         // set after them.
@@ -1401,7 +1405,7 @@ impl State {
             }
             shadow.refresh(list, *from, to - from);
         }
-        self.heap_textures(list, heap, host);
+        self.heap_textures(list, heap, host, None);
         HEAP_BUFFER_PASSES.fetch_add(1, Ordering::Relaxed);
         HEAP_BUFFER_MICROS.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         static LOGGED: AtomicU64 = AtomicU64::new(0);
@@ -1419,6 +1423,42 @@ impl State {
             );
         }
         Some(gpu)
+    }
+
+    /// Early texture preparation from the working 14b renderer: the first
+    /// graphics draw and decoration-bake shaders must see their indexed
+    /// textures even when they never request the buffer-strides root SRV.
+    fn early_textures(&self, list: &HostList, p: &HostPipeline, compute: bool) {
+        const BAKE: [&str; 4] = [
+            "c0a7fe77b1862e10", "0d1575a396dfe513",
+            "b7cfd8dda91ebb6b", "280967ad158cee0b",
+        ];
+        static BUDGET: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+        let (early_ms, bake_ms) = *BUDGET.get_or_init(|| {
+            let ms = |key: &str, default| std::env::var(key).ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(default);
+            (ms("VICTORY_EARLY_TEXTURES_MS", 12), ms("VICTORY_BAKE_TEXTURES_MS", 1500))
+        });
+        let Some(heap) = self.heaps.iter().filter(|&&h| h != 0)
+            .map(|&h| crate::descriptor::heap(h as This)).find(|h| !h.samplers()) else { return; };
+        let Some(host) = heap.host() else { return; };
+        // The direct-write fallback must also cover compute and texture-only
+        // pipelines, not just shaders that ask for SLOT_STRIDES.
+        heap.sync_indexed(host);
+        if compute || (early_ms == 0 && bake_ms == 0) { return; }
+        static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
+        static BAKED_MS: AtomicU64 = AtomicU64::new(0);
+        let frame = crate::frame::current();
+        let first = FRAME.swap(frame, Ordering::Relaxed) != frame;
+        if first { BAKED_MS.store(0, Ordering::Relaxed); }
+        let bake = p.stages.iter().any(|s| BAKE.contains(&s.shader.hash.as_str()));
+        let left = bake_ms.saturating_sub(BAKED_MS.load(Ordering::Relaxed));
+        let budget = if bake && left > 0 { (left, 2 << 30) }
+            else if first && early_ms > 0 { (early_ms, 64 << 20) }
+            else { return; };
+        let began = std::time::Instant::now();
+        self.heap_textures(list, heap, host, Some(budget));
+        if bake { BAKED_MS.fetch_add(began.elapsed().as_millis() as u64, Ordering::Relaxed); }
     }
 
     /// The texture side of [`State::heap_buffers`]: textures the title fills
@@ -1441,13 +1481,14 @@ impl State {
         list: &HostList,
         heap: &crate::descriptor::Heap,
         host: &crate::descriptor::host::HostHeap,
+        budget: Option<(u64, u64)>,
     ) {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if !*ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_TEXTURES").is_none_or(|v| v != "0")) {
             return;
         }
         /// Bytes of texture memory staged per frame.
-        const PER_FRAME: u64 = 192 << 20;
+        let (ms, byte_budget) = budget.unwrap_or((250, 192 << 20));
         static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
         static SPENT: AtomicU64 = AtomicU64::new(0);
         let frame = crate::frame::current();
@@ -1470,7 +1511,7 @@ impl State {
         // Slots whose texture's memory the runtime mapped, unmapped or
         // wrote since the last pass are due again.
         host.texture_slots_remapped(frame);
-        let (due, census) = host.texture_slots_due(frame, 4096);
+        let (due, census) = host.texture_slots_due(frame, if budget.is_some_and(|(_, bytes)| bytes > 192 << 20) { 1 << 16 } else { 4096 });
         HEAP_TEXTURES_WAITING.store(census[0], Ordering::Relaxed);
         for (count, now) in HEAP_TEXTURES_QUEUE.iter().zip(census) {
             count.store(now, Ordering::Relaxed);
@@ -1500,10 +1541,11 @@ impl State {
         // records the frame, and making and staging 192 MB of textures took
         // 1.6-2.2 s of each of the world's first twenty frames (run 20).
         // The rest waits for the next frames, as it does past the bytes.
-        const SPAN: std::time::Duration = std::time::Duration::from_millis(250);
+        let span = std::time::Duration::from_millis(ms);
+        let spent_before = if budget.is_some() { SPENT.load(Ordering::Relaxed) } else { 0 };
         let began = std::time::Instant::now();
         for (index, write) in due {
-            if SPENT.load(Ordering::Relaxed) >= PER_FRAME || began.elapsed() > SPAN {
+            if SPENT.load(Ordering::Relaxed).saturating_sub(spent_before) >= byte_budget || began.elapsed() > span {
                 break;
             }
             // A placed texture whose memory is not mapped (not streamed in
