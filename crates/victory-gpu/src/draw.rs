@@ -1296,6 +1296,7 @@ impl State {
             return Some(gpu);
         }
         let started = std::time::Instant::now();
+        heap.sync_indexed(host);
         // Per host heap: the host copy and range each slot's buffer view
         // reads, kept from pass to pass. Only the slots written since the
         // last pass are looked at again (83,000 slots a pass otherwise, 0.1 s
